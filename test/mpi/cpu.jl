@@ -146,6 +146,7 @@ end
 end
 
 include("spawn.jl")
+include("elide.jl")
 
 @testset "Datadeps" begin
 
