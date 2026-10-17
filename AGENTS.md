@@ -873,3 +873,18 @@ lesson.
    pinned tasks turned out to be a missing earlier fix, 05e04cb), then run
    the real harness with one benchmark removed at a time.
 
+
+83. **`task_tid_for_processor` decides whether `execute!(::ThreadProc)` is
+   inline or a hand-over.** The scheduler starts a task pinned to its
+   processor's thread only for processor types that define
+   `task_tid_for_processor`; every other type starts migratable. A wrapper
+   processor (`MPIProcessor`) that forwards to an inner `ThreadProc` without
+   defining it makes `execute!(::ThreadProc)` miss its inline fast path and
+   create, schedule and wait for a second pinned task on *every* call:
+   160-190 us per task here, 7 us once pinned (a dependent chain went from
+   ~410 to ~270 us per link). Also: a latency benchmark that pins its chain to
+   thread 1 shares that thread with the driver planning the links and can hide
+   exactly this kind of gain; pin to another thread. Sampling profilers are
+   too coarse for 100-us latencies and their signals can trip the hang detector
+   of long cross-rank chains; phase timers around the suspect call localize
+   it in one run.
