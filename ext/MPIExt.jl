@@ -55,6 +55,8 @@ using MPI
 
 function check_uniform(value::Integer, original=value)
     CHECK_UNIFORMITY[] && uniform_execution() || return true
+    # A rank-local graph is not a world-wide collective
+    mpi_world_acceleration() || return true
     comm = MPI.COMM_WORLD
     rank = MPI.Comm_rank(comm)
     matched = compare_all(value, comm)
@@ -170,6 +172,9 @@ struct MPIAcceleration <: Dagger.Acceleration
     comm::MPI.Comm
 end
 MPIAcceleration() = MPIAcceleration(MPI.COMM_WORLD)
+
+# Whether the acceleration of the current task spans every rank (is not a rank-local graph)
+mpi_world_acceleration() = (a = Dagger.current_acceleration(); !(a isa MPIAcceleration) || a.comm == MPI.COMM_WORLD)
 
 aliasing(accel::MPIAcceleration, x::Chunk, T) =
     Dagger.memoized_chunk_aliasing(() -> _aliasing_bcast(accel, x, T), x, T)
@@ -859,13 +864,14 @@ function take_ref_id!()
     end
     # Only the tag-relevant component must fit in an MPI tag
     # N.B. Skip when MPI is uninitialized (e.g. pure-Distributed callers)
-    @assert !MPI.Initialized() || (generic == true ? id : tid) < MPI.tag_ub()
+    # N.B. Ids of a rank-local graph start above the tag range (they never become tags)
+    @assert !MPI.Initialized() || tid >= MPI_LOCAL_ID_BASE || (generic == true ? id : tid) < MPI.tag_ub()
     return MPIRefID(tid, generic, id)
 end
 
 #TODO: partitioned scheduling with comm bifurcation
 function tochunk_pset(x, space::MPIMemorySpace; device=nothing, force_nonlocal=false, kwargs...)
-    @assert space.comm == MPI.COMM_WORLD "$(space.comm) != $(MPI.COMM_WORLD)"
+    @assert space.comm == MPI.COMM_WORLD || MPI.Comm_size(space.comm) == 1 "$(space.comm) is neither the world nor a rank-local communicator"
     local_rank = MPI.Comm_rank(space.comm)
     Mid = take_ref_id!()
     if local_rank != space.rank || force_nonlocal
@@ -1705,6 +1711,9 @@ WeakChunk(c::Chunk{T,H}) where {T,H<:MPIRef} = WeakChunk(c.handle.rank, c.handle
 
 function MemPool.poolget(ref::MPIRef; uniform::Bool=uniform_execution())
     @assert uniform || ref.rank == MPI.Comm_rank(ref.comm) "MPIRef rank mismatch: $(ref.rank) != $(MPI.Comm_rank(ref.comm))"
+    # A communicator of size one has nobody to broadcast to, and the tag a broadcast takes
+    # would be a generic id that only this rank consumes
+    uniform && MPI.Comm_size(ref.comm) == 1 && return poolget(ref.innerRef)
     if uniform
         tag = to_tag()
         if ref.rank == MPI.Comm_rank(ref.comm)
@@ -2312,7 +2321,7 @@ move(to_proc::MPIProcessor, chunk::Chunk) =
 move(to_proc::Processor, d::MPIRef) =
     move(MPIOSProc(d.rank), to_proc, d)
 move(to_proc::MPIProcessor, x) =
-    move(MPIOSProc(), to_proc, x)
+    move(MPIOSProc(to_proc.comm), to_proc, x)
 
 # Non-Chunk task arguments: dual-sided OOP move via MPIProcessor ranks
 move(src::MPIOSProc, dst::MPIProcessor, x) =
@@ -2324,7 +2333,21 @@ move(src::MPIProcessor, dst::MPIProcessor, x::Union{Function,Type}) =
     move(OSProc(), dst.innerProc, x)
 move(::MPIProcessor, ::MPIProcessor, x::Chunk{<:Union{Function,Type}}) = poolget(x.handle)
 
+# A chunk of one communicator used by a task of another: only what this process owns can cross.
+# A rank-local task may read a chunk of the world that this rank owns, in place; the other
+# direction (a shared task reading a rank-local chunk) needs `per_rank` to make it a shared chunk.
+function mpi_move_across_comms(src::MPIProcessor, dst::MPIProcessor, x::Chunk)
+    h = x.handle
+    if MPI.Comm_size(dst.comm) == 1 && h isa MPIRef && h.rank == MPI.Comm_rank(h.comm)
+        return move(src.innerProc, dst.innerProc, poolget(h.innerRef))
+    elseif MPI.Comm_size(dst.comm) == 1
+        error("A rank-local task cannot read a chunk owned by rank $(h.rank): it is not in this process")
+    end
+    error("A task of the world cannot read a rank-local chunk; hand it over with `Dagger.per_rank`")
+end
+
 function move(src::MPIProcessor, dst::MPIProcessor, x::Chunk)
+    src.comm == dst.comm || return mpi_move_across_comms(src, dst, x)
     if Dagger.Sch.SCHED_MOVE[]
         # SPMD argument move at task launch: every rank enters; owner runs
         # egress move before send, destination runs ingress after recv.
@@ -2748,9 +2771,11 @@ function post_stage_array_chunks!(accel::MPIAcceleration, tasks, eltype::Type{T}
     return tasks
 end
 
-accel_matches_proc(accel::MPIAcceleration, proc::MPIOSProc) = true
-accel_matches_proc(accel::MPIAcceleration, proc::MPIClusterProc) = true
-accel_matches_proc(accel::MPIAcceleration, proc::MPIProcessor) = true
+# Processors belong to a communicator: a rank-local graph (communicator of size one) must not
+# be placed on the processors of the world, and the other way round
+accel_matches_proc(accel::MPIAcceleration, proc::MPIOSProc) = proc.comm == accel.comm
+accel_matches_proc(accel::MPIAcceleration, proc::MPIClusterProc) = proc.comm == accel.comm
+accel_matches_proc(accel::MPIAcceleration, proc::MPIProcessor) = proc.comm == accel.comm
 accel_matches_proc(accel::MPIAcceleration, proc) = false
 
 # --- Owner elision --------------------------------------------------------------
@@ -2841,9 +2866,11 @@ end
 # and so rule it out, as does an explicit tag (Datadeps tasks, whose copies and
 # waits do not know about failures that arrive this way).
 mpi_failure_only(::Nothing) = false
-mpi_failure_only(opts::Options) =
-    Dagger.ELIDE_FOREIGN_TASKS[] && !CHECK_UNIFORMITY[] && opts.tag === nothing &&
-    mpi_scope_processor(opts) !== nothing
+function mpi_failure_only(opts::Options)
+    Dagger.ELIDE_FOREIGN_TASKS[] && !CHECK_UNIFORMITY[] && opts.tag === nothing || return false
+    proc = mpi_scope_processor(opts)
+    return proc !== nothing && proc.comm == MPI.COMM_WORLD
+end
 
 # Whether `local_rank` takes part in moving `v` to the task's rank, or cannot tell
 function mpi_arg_participates(v, local_rank::Int)
@@ -2986,6 +3013,8 @@ end
 
 function Dagger.elide_task!(accel::MPIAcceleration, spec, task)
     CHECK_UNIFORMITY[] && return false
+    # Only tasks of the world are planned by every rank; a rank-local graph has nothing to elide
+    accel.comm == MPI.COMM_WORLD || return false
     opts = spec.options
     # Tasks without a scope are placed here, so that every rank knows the owner
     if mpi_task_processor(opts) === nothing && opts.compute_scope === nothing && opts.scope === nothing
@@ -3024,6 +3053,94 @@ function Dagger.elide_task!(accel::MPIAcceleration, spec, task)
     task.stub = stub
     put!(task.future, stub)
     return true
+end
+
+
+# --- Rank-local task graphs: a graph on a communicator of size one --------------------
+#
+# Under `with_rank_local` the current acceleration is an `MPIAcceleration` over
+# `MPI.COMM_SELF`. Everything a communicator has to keep in agreement across its ranks is
+# trivially in agreement (one rank), so no other rank plans, places or waits for these tasks
+# and the world's uniform ids and tags cannot be shifted by differing numbers of local tasks.
+# The tasks are ordinary MPI tasks: MPI processors of this rank (placement by the cached
+# deterministic order, no cost estimate), MPI chunks, the MPI execution protocol with size one.
+
+# Task ids of a rank-local graph live above the tag range, so they can never become a tag
+# that a task of the world could receive; ids of the world stay below `MPI.tag_ub()`.
+const MPI_LOCAL_ID_BASE = 1 << 23
+const MPI_LOCAL_ID_COUNTER = Threads.Atomic{Int}(MPI_LOCAL_ID_BASE)
+
+function Dagger.eager_next_id(accel::MPIAcceleration)
+    accel.comm == MPI.COMM_WORLD && return Dagger.eager_next_id()
+    return UInt64(Threads.atomic_add!(MPI_LOCAL_ID_COUNTER, 1))
+end
+
+const MPI_RANK_LOCAL_ACCELERATION = Ref{Union{MPIAcceleration,Nothing}}(nothing)
+const MPI_RANK_LOCAL_LOCK = ReentrantLock()
+
+# The one-rank communicator is registered once, lazily: its processors join the scheduler's
+# list (the world's processors are filtered out for it by `accel_matches_proc`).
+function mpi_rank_local_acceleration()
+    lock(MPI_RANK_LOCAL_LOCK) do
+        accel = MPI_RANK_LOCAL_ACCELERATION[]
+        accel !== nothing && return accel
+        MPI.Initialized() || error("Rank-local task graphs need MPI: call `Dagger.accelerate!(:mpi)` first")
+        comm = MPI.COMM_SELF
+        ensure_children!(comm)
+        lock(MPI_NODE_UUIDS) do node_maps
+            node_maps[comm] = [system_uuid().value]
+        end
+        lock(MPI_INITIALIZED_COMMS) do comms
+            push!(comms, comm)
+        end
+        ctx = Dagger.Sch.eager_context()
+        lock(ctx) do
+            push!(ctx.procs, MPIOSProc(comm, 0))
+            unique!(ctx.procs)
+        end
+        accel = MPIAcceleration(comm)
+        MPI_RANK_LOCAL_ACCELERATION[] = accel
+        return accel
+    end
+end
+
+Dagger.with_rank_local(f) = Dagger.with_acceleration(f, mpi_rank_local_acceleration())
+
+# A chunk of this rank's rank-local graph, relabelled as a chunk of the world owned by this rank
+# (same data, no copy); `id` is the world id that every rank reserved for it.
+function mpi_adopt_chunk(c::Chunk, id::MPIRefID, ::Type{T}) where {T}
+    h = c.handle::MPIRef
+    comm = MPI.COMM_WORLD
+    me = MPI.Comm_rank(comm)
+    ref = MPIRef(comm, me, h.size, h.innerRef, id)
+    proc = MPIProcessor(c.processor.innerProc, comm, me)
+    space = MPIMemorySpace(c.space.innerSpace, comm, me)
+    return Chunk{T,typeof(ref),typeof(proc),typeof(c.scope),typeof(space)}(T, c.domain, ref, proc, c.scope, space)
+end
+
+# What every other rank holds for rank `r`'s chunk: type and identity, no data
+function mpi_placeholder_chunk(proto::Chunk, r::Int, id::MPIRefID, ::Type{T}) where {T}
+    comm = MPI.COMM_WORLD
+    ref = MPIRef(comm, r, 0, nothing, id)
+    proc = MPIProcessor(proto.processor.innerProc, comm, r)
+    space = MPIMemorySpace(proto.space.innerSpace, comm, r)
+    return Chunk{T,typeof(ref),typeof(proc),typeof(proto.scope),typeof(space)}(T, Dagger.domain(nothing), ref, proc, proto.scope, space)
+end
+
+function Dagger.per_rank(f, ::Type{T}) where {T}
+    comm = MPI.COMM_WORLD
+    me = MPI.Comm_rank(comm)
+    P = MPI.Comm_size(comm)
+    # One world id per rank, taken identically on every rank before anything rank-specific happens
+    ids = [take_ref_id!() for _ in 1:P]
+    local_chunk = Dagger.with_rank_local() do
+        r = f()
+        r isa Chunk ? r :
+            fetch(r isa Dagger.DTask ? r : Dagger.@spawn(identity(r)); raw=true)
+    end
+    local_chunk isa Chunk && local_chunk.handle isa MPIRef ||
+        error("`per_rank` expects the function to return a task or chunk of the rank-local graph")
+    return [r == me ? mpi_adopt_chunk(local_chunk, ids[r+1], T) : mpi_placeholder_chunk(local_chunk, r, ids[r+1], T) for r in 0:P-1]
 end
 
 end # module MPIExt
