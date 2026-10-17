@@ -859,3 +859,17 @@ lesson.
    the failing native call, not its root cause. Keep Intel MPI functional tests
    enabled separately from the benchmark jobs; a green small matmul test is
    insufficient evidence to enable the larger tiled benchmark matrix.
+
+82. **`BasicLFUCache.get!` keeps a stale value for a present key.** A cache
+   whose hit condition is stricter than key equality (`compat_entry` also
+   requires `entry.procs == procs`) must *replace* the entry on a miss, not
+   `get!` it: otherwise the stale entry stays forever and every later lookup
+   misses and recomputes. Measured: a rank-local benchmark that registered
+   extra processors after the world benchmarks had warmed the cache made
+   unscoped tasks 5x slower with 10x the allocations, but only in a suite
+   that registers *after* warming; a standalone script that registers first
+   never shows it. When an integration branch is slower than its parts, first
+   check that the baseline contains the same commits (the "regression" of
+   pinned tasks turned out to be a missing earlier fix, 05e04cb), then run
+   the real harness with one benchmark removed at a time.
+
