@@ -2,6 +2,7 @@
 # thread of its rank instead of waiting behind a busy one.
 hog_busy(seconds::Float64) = (t0 = time(); while time() - t0 < seconds; end; 1)   # does not yield
 free_quick(x::Int) = x + 1
+free_stamp(x::Int) = (x + 1, time())   # also when it ran
 free_where() = Threads.threadid()
 
 @testset "Free MPI threads" begin
@@ -20,16 +21,24 @@ free_where() = Threads.threadid()
             hogs = [Dagger.@spawn(scope=Dagger.ExactScope(p), hog_busy(1.5)) for p in rank0[2:end]]
             sleep(0.3)
             MPI.Barrier(comm)
+            # warm up the stamping variant as well
+            foreach(fetch, Dagger.with_options(; scope=Dagger.scope(mpi_rank=0)) do
+                [Dagger.@spawn(free_stamp(i)) for i in 1:16]
+            end)
+            MPI.Barrier(comm)
             t0 = time()
             # Scope = the whole rank, 16 tasks: the scheduler names every thread in turn, busy ones included
             tasks = Dagger.with_options(; scope=Dagger.scope(mpi_rank=0)) do
-                [Dagger.@spawn(free_quick(i)) for i in 1:16]
+                [Dagger.@spawn(free_stamp(i)) for i in 1:16]
             end
-            vals = fetch.(tasks)
-            elapsed = time() - t0
-            @test vals == [i + 1 for i in 1:16]
-            # Without the switch, the tasks the scheduler places on a busy thread wait for the hogs (measured: 3.3 s of 4 s)
-            rank == 0 && @test elapsed < 1.0       # the hogs still have over a second to run
+            res = fetch.(tasks)
+            @test first.(res) == [i + 1 for i in 1:16]
+            # Without the switch, the tasks the scheduler places on a busy thread wait for the hogs (measured: 3.3 s of 4 s).
+            # N.B. What is asserted is when the tasks *ran*, not when `fetch` returned them: with every thread but one busy
+            # the delivery of a result to the other ranks (the broadcast relay shares that one thread) is delayed
+            # by up to half a second on top (measured), which is not what this switch is about.
+            last_start = maximum(last.(res)) - t0
+            rank == 0 && @test last_start < 1.0    # the hogs still have over a second to run
             # An explicit thread is still a promise
             where = fetch(Dagger.@spawn scope=Dagger.ExactScope(last(rank0)) free_where())
             @test where == last(rank0).innerProc.tid
