@@ -888,3 +888,27 @@ lesson.
    too coarse for 100-us latencies and their signals can trip the hang detector
    of long cross-rank chains; phase timers around the suspect call localize
    it in one run.
+
+84. **Pooled task slots keep the thread decision they were created with.**
+   `@reusable_tasks` pins a slot (or makes it migratable) once, when it is
+   created, and reuses it for later tasks. Where the thread decision can differ
+   per task (MPI pins only tasks that asked for a thread while free threads are
+   on), pinned and migratable tasks need separate caches; otherwise a task that
+   reuses a slot some earlier pinned task created stays bound to that thread
+   (seen only as "the two tasks the rotation put on the busy processor wait",
+   with seven threads free). It shows up only when a pinned warm-up precedes the
+   free tasks, so test the mixed sequence, not each kind alone.
+
+85. **A latency test must assert the thing it measures, and probes must be
+   type-stable.** `fetch` returns after the result has been *delivered* to the
+   other ranks, which with every thread but one busy takes ~0.45 s longer than
+   running the task (the broadcast relay shares that thread): a test of "tasks
+   start on a free thread" that asserted the `fetch` time failed 6 of 8 runs on
+   every build, including ones without the change under suspicion. Stamp the
+   time inside the task. And in a script, a non-constant global passed as a task
+   argument has an unknown type, which sends every task through the slow
+   protocol that broadcasts the result type: spawn in a function. A non-yielding
+   loop never reaches a GC safepoint, so a collection triggered elsewhere waits
+   for it. Several "causes" were ruled out one at a time before the real ones
+   showed up; per-task start and fetch timestamps found them faster than any
+   profile.
