@@ -2517,6 +2517,21 @@ function mpi_run_unbound(f, args...; kwargs...)
     end
 end
 
+# Start the task of an MPI processor already pinned to the thread of its inner processor.
+# Without this the task is migratable, and `execute!(::ThreadProc)` then misses its inline
+# fast path: it creates a second task pinned to the thread, schedules it and waits, which
+# measured 160-190 us per task (a dependent chain of tasks pinned to one thread: 387 us per
+# link at 4 ranks x 16 threads, of which 161 us was this hand-over). Only for processors of
+# this rank, and not for a task that asked for no particular thread while free threads are on.
+function Dagger.Sch.task_tid_for_processor(proc::MPIProcessor{Dagger.ThreadProc}, task)
+    proc.rank == MPI.Comm_rank(proc.comm) || return nothing
+    if Dagger.FREE_MPI_THREADS[]
+        opts = task.options
+        (opts !== nothing && mpi_thread_requested(opts)) || return nothing
+    end
+    return Dagger.Sch.task_tid_for_processor(proc.innerProc)
+end
+
 function mpi_execute_inner(proc::MPIProcessor, f, args...; kwargs...)
     if Dagger.FREE_MPI_THREADS[] && proc.innerProc isa ThreadProc && Dagger.in_task() &&
        !mpi_thread_requested(Dagger.get_tls().task_spec.options)

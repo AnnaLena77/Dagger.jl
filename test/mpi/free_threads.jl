@@ -40,3 +40,32 @@ free_where() = Threads.threadid()
     end
     MPI.Barrier(comm)
 end
+
+# The task of an MPI processor starts pinned to the thread of its inner processor, so
+# `execute!(::ThreadProc)` runs the function inline instead of creating a second pinned task
+# and waiting for it (measured: 160-190 us per task)
+@testset "MPI task starts pinned to its processor's thread" begin
+    cpus = filter(p -> p.innerProc isa Dagger.ThreadProc, mpi_procs())
+    mine = first(sort(filter(p -> p.rank == rank, cpus); by=p -> p.innerProc.tid))
+    others = filter(p -> p.rank != rank, cpus)
+    tid_for = Dagger.Sch.task_tid_for_processor
+    spec(opts) = (; options = opts)    # the hook only reads `task.options`
+    @test tid_for(mine, spec(Dagger.Options())) == mine.innerProc.tid
+    # A processor of another rank has no thread here
+    isempty(others) || @test tid_for(first(others), spec(Dagger.Options())) === nothing
+    # With free threads on, only a task that names its thread is pinned
+    Dagger.free_mpi_threads!(true)
+    try
+        @test tid_for(mine, spec(Dagger.Options())) === nothing
+        @test tid_for(mine, spec(Dagger.Options(; scope=Dagger.ExactScope(mine)))) == mine.innerProc.tid
+    finally
+        Dagger.free_mpi_threads!(false)
+    end
+    # And it runs where it was pinned
+    if rank == 0
+        @test fetch(Dagger.@spawn(scope=Dagger.ExactScope(mine), free_where())) == mine.innerProc.tid
+    else
+        fetch(Dagger.@spawn(scope=Dagger.ExactScope(first(filter(p -> p.rank == 0, cpus))), free_where()))
+    end
+    MPI.Barrier(comm)
+end
