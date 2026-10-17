@@ -2470,6 +2470,38 @@ function mpi_execute_bcast_plan(f, args, proc::MPIProcessor)
     return (; need_type_bcast=false, nothrow, inferred)
 end
 
+# --- Running a task on a free thread of its rank --------------------------------------
+#
+# `execute!(::ThreadProc)` binds the function to the processor's thread, so an MPI task
+# waits behind anything that occupies that thread without yielding (a long kernel, a
+# rank-local task), whichever thread the scheduler happened to name. Measured: a task
+# placed on a thread busy for 1.5 s waited 1.25 s, an unscoped one 2.2 s, while the
+# other threads of the rank sat idle. Only a thread somebody asked for -- a scope
+# naming exactly that processor, which is what Datadeps and explicit pinning use --
+# is a promise; otherwise the choice is the runtime's and need not be kept.
+
+# `scope` names one processor: its thread was requested
+mpi_thread_requested(opts::Options) = mpi_task_scope(opts) isa Dagger.ExactScope
+
+# The task that runs `execute!` is a pooled, migratable task with its TLS in place, so
+# the function can simply be called: Julia runs it on whichever thread is free
+function mpi_run_unbound(f, args...; kwargs...)
+    try
+        return @invokelatest f(args...; kwargs...)
+    catch err
+        err isa InterruptException && rethrow()
+        rethrow(CapturedException(err, catch_backtrace()))
+    end
+end
+
+function mpi_execute_inner(proc::MPIProcessor, f, args...; kwargs...)
+    if Dagger.FREE_MPI_THREADS[] && proc.innerProc isa ThreadProc && Dagger.in_task() &&
+       !mpi_thread_requested(Dagger.get_tls().task_spec.options)
+        return mpi_run_unbound(f, args...; kwargs...)
+    end
+    return execute!(proc.innerProc, f, args...; kwargs...)
+end
+
 function execute!(proc::MPIProcessor, f, args...; kwargs...)
     local_rank = MPI.Comm_rank(proc.comm)
     islocal = local_rank == proc.rank
@@ -2506,7 +2538,7 @@ function execute!(proc::MPIProcessor, f, args...; kwargs...)
     # type on every rank so chunktype stays SPMD-uniform.
     if !plan.need_type_bcast && plan.nothrow
         if islocal
-            result = execute!(proc.innerProc, f, raw_args...; kwargs...)
+            result = mpi_execute_inner(proc, f, raw_args...; kwargs...)
             space = mpi_result_space(result, proc)
             return tochunk(result, proc, space; type=plan.inferred)
         else
@@ -2524,7 +2556,7 @@ function execute!(proc::MPIProcessor, f, args...; kwargs...)
             if islocal
                 # N.B. A failure reaches the other ranks from `task_failed!`, which
                 # covers every way this task can fail, not only an error in `f`
-                result = execute!(proc.innerProc, f, raw_args...; kwargs...)
+                result = mpi_execute_inner(proc, f, raw_args...; kwargs...)
                 space = mpi_result_space(result, proc)
                 return tochunk(result, proc, space; type=plan.inferred)
             else
@@ -2534,7 +2566,7 @@ function execute!(proc::MPIProcessor, f, args...; kwargs...)
         end
         if islocal
             result = try
-                execute!(proc.innerProc, f, raw_args...; kwargs...)
+                mpi_execute_inner(proc, f, raw_args...; kwargs...)
             catch err
                 @opcounter :execute_bcast_send_yield
                 bcast_meta_yield(proc.comm, proc.rank, tag, (:error, mpi_wire_exception(err)))
@@ -2557,7 +2589,7 @@ function execute!(proc::MPIProcessor, f, args...; kwargs...)
     # Non-concrete return type: full status + type/space (or error) broadcast
     if islocal
         result = try
-            execute!(proc.innerProc, f, raw_args...; kwargs...)
+            mpi_execute_inner(proc, f, raw_args...; kwargs...)
         catch err
             @opcounter :execute_bcast_send_yield
             bcast_meta_yield(proc.comm, proc.rank, tag, (:error, mpi_wire_exception(err)))
@@ -2749,14 +2781,18 @@ accel_matches_proc(accel::MPIAcceleration, proc) = false
 # `Dagger.scope(mpi_rank=r)` does, leaves the choice of thread to the scheduler, and a
 # rank that elides the task never learns which thread that was. `scope=` sets both
 # `scope` and `compute_scope`; accept either, or both when equal.
-function mpi_scope_processor(opts::Options)
-    scope = if opts.compute_scope === nothing
+function mpi_task_scope(opts::Options)
+    return if opts.compute_scope === nothing
         opts.scope
     elseif opts.scope === nothing || opts.scope === opts.compute_scope || opts.scope == opts.compute_scope
         opts.compute_scope
     else
         nothing
     end
+end
+
+function mpi_scope_processor(opts::Options)
+    scope = mpi_task_scope(opts)
     if scope isa Dagger.ExactScope
         proc = scope.processor
         return proc isa MPIProcessor ? proc : nothing
@@ -2925,8 +2961,27 @@ function mpi_preplace!(accel::MPIAcceleration, spec, task)
     for i in 2:length(fargs)
         Dagger.iscompatible_arg(proc, opts, chunktype(Dagger.value(fargs[i]))) || return false
     end
-    opts.compute_scope = Dagger.ExactScope(proc)
+    # Name the rank, not the thread: which thread runs the task stays the scheduler's
+    # (and, with `free_mpi_threads!`, the runtime's) choice. One scope object per
+    # (scope, rank), so the scheduler's candidate caches keep hitting.
+    opts.compute_scope = mpi_rank_scope(scope, ordered, proc.rank)
     return true
+end
+
+const MPI_RANK_SCOPE_CACHE = LockedObject(Dict{Tuple{UInt,Int},Tuple{Any,Any}}())
+
+function mpi_rank_scope(scope, ordered, rank::Int)
+    key = (objectid(scope), rank)
+    hit = lock(MPI_RANK_SCOPE_CACHE) do cache
+        get(cache, key, nothing)
+    end
+    hit !== nothing && hit[1] === scope && return hit[2]
+    ranked = Dagger.UnionScope([Dagger.ExactScope(p) for p in ordered if p isa MPIProcessor && p.rank == rank])
+    lock(MPI_RANK_SCOPE_CACHE) do cache
+        length(cache) >= 1024 && empty!(cache)
+        cache[key] = (scope, ranked)
+    end
+    return ranked
 end
 
 function Dagger.elide_task!(accel::MPIAcceleration, spec, task)

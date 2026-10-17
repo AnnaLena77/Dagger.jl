@@ -147,6 +147,7 @@ end
 
 include("spawn.jl")
 include("elide.jl")
+include("free_threads.jl")
 
 @testset "Datadeps" begin
 
