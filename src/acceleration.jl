@@ -102,6 +102,19 @@ the other accelerations have no such notion.
 function with_rank_local end
 
 """
+    with_group(f, comm)
+
+Run `f` so that every task spawned in it belongs to a task graph on the communicator `comm`
+(a group of ranks): only its members plan and run these tasks, with their own task ids, and every
+member runs the same program inside the block. Collective over `comm` the first time `comm` is
+used. Defined by the MPI extension; see `free_group!`.
+"""
+function with_group end
+
+"Release the bookkeeping of a group used with [`with_group`](@ref); collective over its members."
+function free_group! end
+
+"""
     per_rank(f, T)
 
 SPMD operation (every rank calls it, from the driver task): every rank runs `f()` as a
@@ -110,6 +123,16 @@ is returned as a vector with one shared chunk per rank, chunk `r` owned by rank 
 shared tasks can take as an argument. Defined by the MPI extension.
 """
 function per_rank end
+
+"""
+    per_group(f, comm, T)
+
+[`per_rank`](@ref) on the communicator `comm` instead of the world: every member of `comm` calls it
+(from the driver), runs `f()` as a rank-local graph and gets a vector with one chunk per member, chunk
+`r` owned by the member with rank `r` in `comm` and usable as an argument of the tasks of the group
+(see [`with_group`](@ref)). Defined by the MPI extension.
+"""
+function per_group end
 
 """
     fetch_failed_uniform!(accel)

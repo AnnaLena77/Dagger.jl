@@ -727,9 +727,10 @@ function processors(memSpace::MPIMemorySpace)
 end
 
 struct MPIRefID
-    tid::UInt32
+    # 64 bit: the ids of a group graph live above MPI_GROUP_ID_BASE (2^40)
+    tid::UInt64
     generic::Bool
-    id::UInt32
+    id::UInt64
     function MPIRefID(tid, generic, id)
         @assert tid > 0 || generic "Invalid MPIRefID: tid=$tid, generic=$generic, id=$id"
         return new(tid, generic, id)
@@ -761,7 +762,13 @@ function to_tag()
     @assert !Dagger.Sch.SCHED_MOVE[] "We should not create a tag during Sch move"
     return to_tag(take_ref_id!())
 end
-to_tag(id::MPIRefID) = id.generic ? id.id : id.tid
+# Ids of a group graph (a communicator of k ranks, see "Group graphs") live above MPI_GROUP_ID_BASE and
+# are unique per process across groups; a message on a communicator never mixes with one on another, so
+# only the counter part of the id (the low bits) has to be a valid, group-uniform tag.
+const MPI_GROUP_ID_BASE = 1 << 40
+const MPI_GROUP_TAG_MASK = (1 << 22) - 1
+mpi_tag_of(x::Integer) = x >= MPI_GROUP_ID_BASE ? Int(x & MPI_GROUP_TAG_MASK) : Int(x)
+to_tag(id::MPIRefID) = id.generic ? mpi_tag_of(id.id) : mpi_tag_of(id.tid)
 
 # DATADEPS_THUNK_ID (current task uid for deterministic MPIRefID generation) is owned by
 # core Dagger (src/datadeps/queue.jl) and imported below; core datadeps sets it
@@ -883,7 +890,7 @@ end
 
 #TODO: partitioned scheduling with comm bifurcation
 function tochunk_pset(x, space::MPIMemorySpace; device=nothing, force_nonlocal=false, kwargs...)
-    @assert space.comm == MPI.COMM_WORLD || MPI.Comm_size(space.comm) == 1 "$(space.comm) is neither the world nor a rank-local communicator"
+    @assert space.comm == MPI.COMM_WORLD || MPI.Comm_size(space.comm) == 1 || mpi_is_group(space.comm) "$(space.comm) is neither the world, a rank-local communicator nor a registered group"
     local_rank = MPI.Comm_rank(space.comm)
     Mid = take_ref_id!()
     if local_rank != space.rank || force_nonlocal
@@ -1705,7 +1712,7 @@ function mpi_check_poison()
     state === nothing && return
     err = nothing
     @lock state.cond begin
-        slot = get(state.slots, (ref.rank, UInt32(ref.id.tid)), nothing)
+        slot = get(state.slots, (ref.rank, UInt32(mpi_tag_of(ref.id.tid))), nothing)
         if slot !== nothing && !isempty(slot.values)
             msg = slot.values[1]
             msg isa Tuple && first(msg) === :error && (err = msg[2])
@@ -1721,13 +1728,24 @@ mpi_poisonable(f, ref::MPIRef) =
 
 WeakChunk(c::Chunk{T,H}) where {T,H<:MPIRef} = WeakChunk(c.handle.rank, c.handle.id.id, WeakRef(c), T)
 
+# The generic id a fetch takes (and so the tag of its broadcast) comes from the counter of the communicator the
+# chunk lives in, wherever the fetch is called from: a fetch of a result of a group graph outside its `with_group`
+# block must not take an id from the world's counter (the ranks outside the group do not take one), and a fetch
+# of a world chunk inside a group block must not take one from the group's.
+function mpi_fetch_tag(comm::MPI.Comm)
+    a = Dagger.current_acceleration()
+    a isa MPIAcceleration && a.comm == comm && return to_tag()
+    accel = comm == MPI.COMM_WORLD ? MPIAcceleration(comm) : mpi_group_acceleration(comm)
+    return Dagger.with_acceleration(to_tag, accel)
+end
+
 function MemPool.poolget(ref::MPIRef; uniform::Bool=uniform_execution())
     @assert uniform || ref.rank == MPI.Comm_rank(ref.comm) "MPIRef rank mismatch: $(ref.rank) != $(MPI.Comm_rank(ref.comm))"
     # A communicator of size one has nobody to broadcast to, and the tag a broadcast takes
     # would be a generic id that only this rank consumes
     uniform && MPI.Comm_size(ref.comm) == 1 && return poolget(ref.innerRef)
     if uniform
-        tag = to_tag()
+        tag = mpi_fetch_tag(ref.comm)
         if ref.rank == MPI.Comm_rank(ref.comm)
             return bcast_yield(ref.comm, ref.rank, tag, poolget(ref.innerRef))
         else
@@ -2350,12 +2368,16 @@ move(::MPIProcessor, ::MPIProcessor, x::Chunk{<:Union{Function,Type}}) = poolget
 # direction (a shared task reading a rank-local chunk) needs `per_rank` to make it a shared chunk.
 function mpi_move_across_comms(src::MPIProcessor, dst::MPIProcessor, x::Chunk)
     h = x.handle
-    if MPI.Comm_size(dst.comm) == 1 && h isa MPIRef && h.rank == MPI.Comm_rank(h.comm)
+    # Only the world cannot take a chunk of a smaller communicator (it would need every rank to take part)
+    dst.comm == MPI.COMM_WORLD &&
+        error("A task of the world cannot read a chunk of a rank-local graph or a group; hand it over with `Dagger.per_rank`")
+    # Every member of the destination communicator enters the argument move; only the destination rank
+    # reads the chunk, and only if this process owns it (nothing crosses communicators over the network)
+    dst.rank == MPI.Comm_rank(dst.comm) || return nothing
+    if h isa MPIRef && h.rank == MPI.Comm_rank(h.comm)
         return move(src.innerProc, dst.innerProc, poolget(h.innerRef))
-    elseif MPI.Comm_size(dst.comm) == 1
-        error("A rank-local task cannot read a chunk owned by rank $(h.rank): it is not in this process")
     end
-    error("A task of the world cannot read a rank-local chunk; hand it over with `Dagger.per_rank`")
+    error("A task of a rank-local graph or group cannot read a chunk owned by rank $(h.rank) of another communicator: it is not in this process")
 end
 
 function move(src::MPIProcessor, dst::MPIProcessor, x::Chunk)
@@ -2375,7 +2397,7 @@ function move(src::MPIProcessor, dst::MPIProcessor, x::Chunk)
             return nothing
         else
             @assert DATADEPS_THUNK_ID[] != 0 "Cross-rank argument transfer requires the thunk's TID in scope (chunk owner $(x.handle.rank), destination rank $(dst.rank))"
-            tag = UInt32(DATADEPS_THUNK_ID[])
+            tag = UInt32(mpi_tag_of(DATADEPS_THUNK_ID[]))
             # Source processor for egress uses the chunk's owning rank
             from = src.rank == x.handle.rank ? src :
                    MPIProcessor(src.innerProc, src.comm, x.handle.rank)
@@ -2958,7 +2980,7 @@ function Dagger.Sch.task_failed!(::MPIAcceleration, thunk, value)
     proc = mpi_scope_processor(opts)
     MPI.Comm_rank(proc.comm) == proc.rank || return
     ex = mpi_wire_exception(value isa Dagger.DTaskFailedException ? value.ex : value)
-    tag = UInt32(thunk.id)
+    tag = UInt32(mpi_tag_of(thunk.id))
     Dagger.Sch.errormonitor_tracked("mpi_task_failed", Threads.@spawn begin
         bcast_meta_yield(proc.comm, proc.rank, tag, (:error, ex))
     end)
@@ -3176,6 +3198,13 @@ const MPI_LOCAL_ID_COUNTER = Threads.Atomic{Int}(MPI_LOCAL_ID_BASE)
 
 function Dagger.eager_next_id(accel::MPIAcceleration)
     accel.comm == MPI.COMM_WORLD && return Dagger.eager_next_id()
+    if accel.comm != MPI.COMM_SELF
+        g = lock(MPI_GROUPS) do groups
+            get(groups, accel.comm, nothing)
+        end
+        g === nothing && error("Task ids of a group graph need the group to be registered (`Dagger.with_group`)")
+        return UInt64(MPI_GROUP_ID_BASE + (g.index << 24) + Threads.atomic_add!(g.counter, 1))
+    end
     return UInt64(Threads.atomic_add!(MPI_LOCAL_ID_COUNTER, 1))
 end
 
@@ -3210,11 +3239,98 @@ end
 
 Dagger.with_rank_local(f) = Dagger.with_acceleration(f, mpi_rank_local_acceleration())
 
+# --- Group graphs: a graph on a communicator of k ranks --------------------------------
+#
+# The one-rank communicator generalized: a task graph that only the members of a communicator plan
+# and run (every member runs the same program inside `with_group`, as under the world), with its
+# own id counter, its own processors and its own message space. Ranks outside the group never see
+# its tasks, so planning per rank does not depend on how many ranks there are in total. What the
+# group needs from the application: a communicator (`MPI.Comm_create_group` over the members, or
+# `Comm_split`), and the rule that data crosses between groups only where one process is a member
+# of both and owns the chunk (the owner reads it in place), as for the one-rank case.
+
+struct MPIGroupState
+    index::Int                        # unique across all groups of the job (see `mpi_group_acceleration`)
+    counter::Threads.Atomic{Int}      # task ids of this group: MPI_GROUP_ID_BASE + (index << 24) + counter
+    accel::MPIAcceleration
+end
+const MPI_GROUPS = LockedObject(Dict{MPI.Comm,MPIGroupState}())
+const MPI_NEXT_GROUP_CANDIDATE = Threads.Atomic{Int}(1)
+mpi_is_group(comm::MPI.Comm) = lock(MPI_GROUPS) do groups
+    haskey(groups, comm)
+end
+
+# Collective over the members of `comm` the first time it is used. The group index that makes the task
+# ids of two groups distinct in a process that is a member of both is chosen without any coordination
+# between groups: every process reserves a candidate (unique across the job: counter * world size +
+# world rank) and the members take the largest one, which is some member's reservation and so
+# belongs to this group alone.
+function mpi_group_acceleration(comm::MPI.Comm)
+    comm == MPI.COMM_WORLD && return MPIAcceleration(comm)
+    comm == MPI.COMM_SELF && return mpi_rank_local_acceleration()
+    st = lock(MPI_GROUPS) do groups
+        get(groups, comm, nothing)
+    end
+    st !== nothing && return st.accel
+    MPI.Initialized() || error("Group graphs need MPI: call `Dagger.accelerate!(:mpi)` first")
+    world = MPI.COMM_WORLD
+    candidate = Threads.atomic_add!(MPI_NEXT_GROUP_CANDIDATE, 1) * MPI.Comm_size(world) + MPI.Comm_rank(world)
+    index = MPI.Allreduce(candidate, max, comm)
+    accel = MPIAcceleration(comm)
+    mpi_initialize_group!(accel)
+    lock(MPI_GROUPS) do groups
+        groups[comm] = MPIGroupState(index, Threads.Atomic{Int}(1), accel)
+    end
+    return accel
+end
+
+# `initialize_acceleration!` for a communicator that is not the world: the same node map, broadcast
+# relay and processors, without the global side effects (the default RNGs of the members stay as they are)
+function mpi_initialize_group!(a::MPIAcceleration)
+    lock(MPI_INITIALIZED_COMMS) do comms
+        push!(comms, a.comm)
+    end
+    node_uuids = MPI.Allgather(system_uuid().value, a.comm)
+    lock(MPI_NODE_UUIDS) do node_maps
+        node_maps[a.comm] = node_uuids
+    end
+    start_bcast_relay!(a.comm)
+    ctx = Dagger.Sch.eager_context()
+    lock(ctx) do
+        for i in 0:(MPI.Comm_size(a.comm)-1)
+            push!(ctx.procs, MPIOSProc(a.comm, i))
+        end
+        unique!(ctx.procs)
+    end
+    return
+end
+
+Dagger.with_group(f, comm::MPI.Comm) = Dagger.with_acceleration(f, mpi_group_acceleration(comm))
+
+# Collective over the members. The communicator itself stays the caller's to free.
+function Dagger.free_group!(comm::MPI.Comm)
+    st = lock(MPI_GROUPS) do groups
+        pop!(groups, comm, nothing)
+    end
+    st === nothing && return
+    stop_bcast_relay!(comm)
+    lock(MPI_INITIALIZED_COMMS) do comms
+        delete!(comms, comm)
+    end
+    lock(MPI_NODE_UUIDS) do node_maps
+        delete!(node_maps, comm)
+    end
+    ctx = Dagger.Sch.eager_context()
+    lock(ctx) do
+        filter!(p -> !(p isa MPIOSProc && p.comm == comm), ctx.procs)
+    end
+    return
+end
+
 # A chunk of this rank's rank-local graph, relabelled as a chunk of the world owned by this rank
 # (same data, no copy); `id` is the world id that every rank reserved for it.
-function mpi_adopt_chunk(c::Chunk, id::MPIRefID, ::Type{T}) where {T}
+function mpi_adopt_chunk(c::Chunk, id::MPIRefID, ::Type{T}, comm::MPI.Comm=MPI.COMM_WORLD) where {T}
     h = c.handle::MPIRef
-    comm = MPI.COMM_WORLD
     me = MPI.Comm_rank(comm)
     ref = MPIRef(comm, me, h.size, h.innerRef, id)
     proc = MPIProcessor(c.processor.innerProc, comm, me)
@@ -3223,28 +3339,30 @@ function mpi_adopt_chunk(c::Chunk, id::MPIRefID, ::Type{T}) where {T}
 end
 
 # What every other rank holds for rank `r`'s chunk: type and identity, no data
-function mpi_placeholder_chunk(proto::Chunk, r::Int, id::MPIRefID, ::Type{T}) where {T}
-    comm = MPI.COMM_WORLD
+function mpi_placeholder_chunk(proto::Chunk, r::Int, id::MPIRefID, ::Type{T}, comm::MPI.Comm=MPI.COMM_WORLD) where {T}
     ref = MPIRef(comm, r, 0, nothing, id)
     proc = MPIProcessor(proto.processor.innerProc, comm, r)
     space = MPIMemorySpace(proto.space.innerSpace, comm, r)
     return Chunk{T,typeof(ref),typeof(proc),typeof(proto.scope),typeof(space)}(T, Dagger.domain(nothing), ref, proc, proto.scope, space)
 end
 
-function Dagger.per_rank(f, ::Type{T}) where {T}
-    comm = MPI.COMM_WORLD
+function Dagger.per_group(f, comm::MPI.Comm, ::Type{T}) where {T}
     me = MPI.Comm_rank(comm)
     P = MPI.Comm_size(comm)
-    # One world id per rank, taken identically on every rank before anything rank-specific happens
-    ids = [take_ref_id!() for _ in 1:P]
+    # One id of the group per member, taken identically by every member before anything member-specific
+    # happens (for the world: one world id per rank)
+    ids = Dagger.with_group(comm) do
+        [take_ref_id!() for _ in 1:P]
+    end
     local_chunk = Dagger.with_rank_local() do
         r = f()
         r isa Chunk ? r :
             fetch(r isa Dagger.DTask ? r : Dagger.@spawn(identity(r)); raw=true)
     end
     local_chunk isa Chunk && local_chunk.handle isa MPIRef ||
-        error("`per_rank` expects the function to return a task or chunk of the rank-local graph")
-    return [r == me ? mpi_adopt_chunk(local_chunk, ids[r+1], T) : mpi_placeholder_chunk(local_chunk, r, ids[r+1], T) for r in 0:P-1]
+        error("`per_rank`/`per_group` expects the function to return a task or chunk of the rank-local graph")
+    return [r == me ? mpi_adopt_chunk(local_chunk, ids[r+1], T, comm) : mpi_placeholder_chunk(local_chunk, r, ids[r+1], T, comm) for r in 0:P-1]
 end
+Dagger.per_rank(f, ::Type{T}) where {T} = Dagger.per_group(f, MPI.COMM_WORLD, T)
 
 end # module MPIExt
