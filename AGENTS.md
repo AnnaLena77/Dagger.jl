@@ -937,3 +937,17 @@ lesson.
    the foreign-rank cost of an `ExactScope` task with that of a rank-scoped one (probe
    `LLM_info/bench/scope_cost.jl`, 16 and 32 threads per rank). Also: building a rank scope costs
    ~0.35 ms at 32 threads; build it once.
+
+88. **Type the return of anything that reads from a `Dict{..,Any}` cache, and
+   never extrapolate laptop timings to the cluster.** `mpi_scope_processor`
+   returned an entry of a `Dict{UInt,Tuple{Any,Any}}`, so it inferred as `Any`
+   and every use in `elide_task!` (field reads, `memory_space`,
+   `tochunk(...; type=T)`) was a dynamic dispatch, once per planned task;
+   asserting `::Union{Nothing,MPIProcessor}` on the return sites took 13-14 %
+   off the per-task cost (19.3 -> 16.75 us on Fulda). The same loop costs 1.4 us
+   on an M-series laptop: on the Opteron nodes *every* primitive (atomic add,
+   lock, `Comm_rank`) is 7-20x slower, so the shape of a profile transfers but
+   absolute numbers do not. Measure per-task costs on the cluster, with GC time
+   reported separately (here it was 0 ms, so it was not the explanation). A
+   scoped value is a walk of the scope chain: read it once.
+
