@@ -951,3 +951,33 @@ lesson.
    reported separately (here it was 0 ms, so it was not the explanation). A
    scoped value is a walk of the scope chain: read it once.
 
+
+89. **A collective under Dagger must be non-blocking and waited for
+   cooperatively, and which MPI is installed changes the answer.** A blocking
+   `MPI.Allgather`/`Barrier` parks the OS thread inside MPI (no relay runs on
+   it, no GC safepoint is reached), which closes a cross-rank cycle with the
+   broadcast relay. MPI.jl 0.20 wraps the blocking `Allgatherv` only, but its
+   low-level `MPI.API.MPI_Iallgather`/`MPI_Iallgatherv` exist: issue the
+   request and wait with `__wait_for_request` (`MPI.Test` plus `yield`).
+   Measured, the same exchange is 2.6x *faster* than hand-written
+   point-to-point rounds on Open MPI 5.0.10 (4 ranks: 41 vs 105 us) and 2.4x
+   *slower* on MPICH 5.0.2 (216 vs 91 us); on Fulda (Open MPI) the native one
+   wins from 16 KB per rank. So keep both paths testable (a `Ref` switch, an
+   environment override) and run the tests on both. To get Open MPI locally,
+   copy `test/mpi/env` to a scratch directory, make its `[sources]` and
+   manifest paths absolute, `Pkg.add("MPIPreferences")` (the preference is only
+   seen for a direct dependency) and call
+   `MPIPreferences.use_system_binary(library_names=[...], mpiexec=...)`. A
+   per-contribution size cannot choose the algorithm: every rank must decide
+   alike.
+
+90. **An idle poller is not free, and a longer sleep can make it worse.** A
+   rank in G groups ran G relay tasks that wake on their own; each idle one
+   blocks an OS thread in `Libc.systemsleep` per cycle, so with 4 threads a
+   world hop went 50 -> 91 / 255 / 897 us at 8 / 32 / 128 live groups. A longer
+   blocking sleep made it *worse* (a thread is held hostage for the whole
+   sleep), a cooperative `sleep` helped only partly, and serving every group
+   from the world's relay task was slower still, because one `MPI_Improbe` per
+   group per sweep costs more than the sleepers it replaces (8 groups: 259 us).
+   What works is fewer live groups: `free_group!` restores the 49 us. Measure
+   with `LLM_info/bench/many_groups.jl` before redesigning a poller.
