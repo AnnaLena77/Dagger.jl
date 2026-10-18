@@ -8,6 +8,7 @@ group_sum(x::Vector{Float64}) = sum(x)
 group_sum2(a::Vector{Float64}, b::Vector{Float64}) = sum(a) + sum(b)
 group_pass(x::Vector{Float64}) = x
 group_bad(x::Int) = x > 0 ? error("group failure") : x
+group_plus!(X, c) = (X .+= c; nothing)
 
 @testset "Group graphs" begin
     # Two stages of overlapping groups: pairs {0,1} {2,3} ..., then by parity {0,2,..} {1,3,..}
@@ -105,6 +106,33 @@ group_bad(x::Int) = x > 0 ? error("group failure") : x
         t = Dagger.@spawn scope=pinned(nranks-1) group_inc(5)
         @test fetch(t) == 6
         @test allequal(MPI.Allgather(Int(t.uid), comm))
+    end
+
+    # A Datadeps region of a group: the array is owned by the group's rank 0 (the owner of the region's data), tasks run on
+    # every member, the value is written back at the end of the region; groups run a different number of regions
+    @testset "Datadeps regions inside a group; the world still agrees" begin
+        A = fill(1.0, 6)
+        reps = 1 + rank % 2
+        Dagger.with_group(stage2) do
+            for _ in 1:reps
+                Dagger.spawn_datadeps() do
+                    for r in 0:g2size-1
+                        Dagger.@spawn scope=gscope(stage2, r) group_plus!(InOut(A), 1.0)
+                    end
+                end
+            end
+        end
+        g2rank == 0 && @test A == fill(1.0 + reps * g2size, 6)
+        g2rank != 0 && @test A == fill(1.0, 6)           # the other members keep their own copy, as in the world
+        t = Dagger.@spawn scope=pinned(nranks-1) group_inc(1)
+        @test fetch(t) == 2
+        @test allequal(MPI.Allgather(Int(t.uid), comm))
+        # and a region of the world still works
+        W = fill(1.0, 4)
+        Dagger.spawn_datadeps() do
+            Dagger.@spawn scope=pinned(nranks-1) group_plus!(InOut(W), 1.0)
+        end
+        rank == 0 && @test W == fill(2.0, 4)
     end
 
     @testset "owner elision works inside a group" begin

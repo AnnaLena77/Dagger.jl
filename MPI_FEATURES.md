@@ -139,7 +139,7 @@ Rules:
   owns the chunk (it is then used in place); anything else is an error: hand data over with `per_group` or a shared task;
 * with the elision switch on, a member that neither runs a group task nor owns its data skips it exactly like in the world graph;
 * a failing group task is seen by every member that fetches it; the world and other groups are unaffected;
-* not supported yet: Datadeps and GPU chunks inside a group;
+* `Dagger.spawn_datadeps()` works inside a group: the data of a region is owned by the group's rank 0, tasks run on any member, the value is written back at the end of the region (tested at 3 and 4 ranks, CPU only); not supported yet: GPU chunks inside a group;
 * **keep the number of live groups per rank small and call `free_group!` when a group is done.** Each group has a broadcast
   relay of its own that polls and sleeps by itself, and idle relays take thread time from the workers. Measured on one machine
   with 2 ranks x 4 threads (a dependent task hop in the *world* graph, 50 us without groups): 1 live group 56 us, 4 groups 67 us,
