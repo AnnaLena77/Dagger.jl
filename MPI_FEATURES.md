@@ -35,7 +35,9 @@ reads does not build the task at all (about 20 us instead of about 170 us per su
 A rank elides a task when **all** of these hold (otherwise it silently behaves as before, never wrongly):
 * the task is scoped to **one rank**: `scope=Dagger.scope(mpi_rank=r)` (or an `ExactScope` of one of its processors);
 * this rank is not that rank and owns none of the task's arguments;
-* every argument is a plain value, an `MPIRef` chunk without a scope restriction, or an earlier task whose owner is known;
+* every argument is a plain value, an `MPIRef` chunk (a scope restriction on the chunk is fine as long as it does not
+  contradict the task's own scope), an earlier task whose owner is known, or **a block of a `DArray`** (the block grid is the
+  same on every rank, so the rank of each block is known when the task is spawned);
 * the function's **return type is concrete** (write type-stable functions; a task whose result type cannot be inferred
   needs the type broadcast to everyone);
 * uniformity checking is off (`Dagger.check_uniformity!(true)` disables elision) and it is not a Datadeps task.
@@ -46,6 +48,9 @@ preferred, otherwise rotation by task id) and can then be elided on the other ra
 Failure semantics change slightly: for such a task the owner reports **only failures**. A rank learns of a failure when it
 later needs the task's data (an argument move or a `fetch`); a rank that never touches the result never sees it.
 `fetch` stays uniform: every rank takes the same ids.
+
+`DArray` blocks do not defeat elision any more (they did before: every task reading a block was planned in full by every
+rank, 190-250 us; a rank that only plans such a task now pays about 50 us, measured on 4 ranks x 8 threads).
 
 Practical rule: give each task an owner rank (`scope=Dagger.scope(mpi_rank=r)`), keep its inputs as chunks owned by
 that rank, and make the functions type-stable. Measured effect (1 node, 4 ranks): pinned round robin 40.9 -> 13.9 ms
@@ -131,4 +136,5 @@ shows it, and the log lines containing `Non-uniform value`, `Hit probable hang` 
 `perf/mpi-constants` (placement cache, kick loop, stale-cache fix) · `perf/sched-cost-estimate` ·
 `fix/mpi-space-hash` · `feat/mpi-owner-elision` (elision + free threads) · `feat/mpi-comm-self` (rank-local graphs) ·
 `perf/mpi-pin-runner` (pinned MPI tasks) · `fix/mpi-reftid-leak` · `feat/mpi-local-datadeps` ·
+`feat/mpi-elide-scoped-chunks` · `feat/mpi-elide-darray-blocks` (elision for scope-restricted chunks and `DArray` blocks) ·
 `bench/tasks-suite` (the `tasks` benchmark suite, `benchmark/suites/tasks.jl`) · `integration/mpi-all` (all of it).
