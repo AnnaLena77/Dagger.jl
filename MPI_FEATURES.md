@@ -165,14 +165,25 @@ all_summaries = Dagger.allgather(summaries)        # Vector{Summary} on EVERY ra
 ```
 
 * SPMD collective: every rank calls it with the same list in the same order (inside `with_group` it works on the group);
-* each rank contributes the values of the tasks whose result it owns; the ranks pass them around in ceil(log2 P) rounds
-  (a dissemination allgather, any P), with cooperative waits, so it never parks the thread that runs the broadcast relay;
+* each rank contributes the values of the tasks whose result it owns and the library's own non-blocking allgather
+  (`MPI_Iallgather` for the sizes, `MPI_Iallgatherv` for the bytes) moves them, waited for cooperatively with `MPI.Test`, so it
+  never parks the thread that runs the broadcast relay; `JULIA_DAGGER_MPI_ALLGATHER=rounds` (on every rank) selects hand-written
+  rounds of point-to-point messages instead (about 2x faster on MPICH on a laptop, slower from 16 KB on Open MPI on Fulda);
+* call it from the driver, one call at a time (an MPI rule for collectives on one communicator);
 * a failed task makes **every** rank throw its exception, after all have taken part; the next call works;
 * it takes no task or reference ids, so it can be called wherever every rank calls it;
 * results must be MPI chunks (the normal case under `accelerate!(:mpi)`); elsewhere `allgather(tasks)` is `fetch.(tasks)`.
 
-Measured on Fulda (gather task + `fetch` against `MPI.Allgather`, 4 KB per rank): 14.7 / 23 / 138 ms at 26 / 52 / 104 ranks against
-0.6 / 1.3 / 2.8 ms; at 16 KB 42 / 72 / 241 against 2 / 6 / 20 ms (see `LLM_info/STRATEGY.md` for the `Dagger.allgather` figures).
+Measured on Fulda (Open MPI, 24 / 48 / 96 ranks, everything but the exchange finished, slowest rank, ms; noisy, single runs):
+
+| per rank | gather task + `fetch` | `Dagger.allgather`, rounds | `Dagger.allgather`, native (default) |
+|---|---|---|---|
+| 4 KB | 10 / 18 / 48 | 5.0 / 6.3 / 19 | 7.8 / 11 / 20 |
+| 16 KB | 14 / 40 / 166 | 7.5 / 22 / 121 | 14 / 18 / 39 |
+| 64 KB | 63 / 209 / 408 | 34 / 43 / 258 | 17 / 28 / 171 |
+
+So 2-7x faster than the pattern it replaces; a raw `MPI.Allgather` is still faster (1-14 ms at 4 KB), the rest is the cooperative waiting
+and the (de)serialization of the contributions.
 
 ## 5. Measured costs (4 ranks x 16 threads, one node)
 
