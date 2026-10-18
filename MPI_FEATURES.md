@@ -205,8 +205,9 @@ and the (de)serialization of the contributions.
 * "Hit probable hang on recv" is a warning after ~10 s without progress, often just a slow first compile; "Hit hang" aborts.
 * Do not wait with `yield()` loops (sticky tasks starve the thread's spawned work); use `sleep` or `wait`.
 * A benchmark chain pinned to thread 1 shares that thread with the driver that plans the tasks; pin to another thread.
-* Known unrelated failures of the repository's own MPI suite on Open MPI at 2 x 2: the `check_uniform` test stalls
-  after its deliberate failure, and the stencil tests need many minutes of first-call compilation.
+* The repository's own MPI suite (`test/mpi/cpu.jl`) takes about 43 minutes at 2 ranks x 2 threads on the Fulda nodes (Open MPI) and passes there on
+  `integration/mpi-all` (1263 and 1270 assertions on the two ranks, no failures); long silent phases (first-call compilation of the stencil and sparse
+  kernels, minutes) print "Hit probable hang on recv" warnings that are only timers. Give a job at least an hour, and do not cancel on the warning.
 
 ## 7. What to report back when something looks wrong
 
