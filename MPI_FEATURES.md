@@ -165,10 +165,13 @@ all_summaries = Dagger.allgather(summaries)        # Vector{Summary} on EVERY ra
 ```
 
 * SPMD collective: every rank calls it with the same list in the same order (inside `with_group` it works on the group);
-* each rank contributes the values of the tasks whose result it owns and the library's own non-blocking allgather
-  (`MPI_Iallgather` for the sizes, `MPI_Iallgatherv` for the bytes) moves them, waited for cooperatively with `MPI.Test`, so it
-  never parks the thread that runs the broadcast relay; `JULIA_DAGGER_MPI_ALLGATHER=rounds` (on every rank) selects hand-written
-  rounds of point-to-point messages instead (about 2x faster on MPICH on a laptop, slower from 16 KB on Open MPI on Fulda);
+* each rank contributes the values of the tasks whose result it owns; by default the ranks pass them around in ceil(log_5 P) rounds of
+  point-to-point messages with cooperative waits (so it never parks the thread that runs the broadcast relay);
+  `JULIA_DAGGER_MPI_ALLGATHER=native` (on every rank) uses the library's non-blocking `MPI_Iallgather` / `MPI_Iallgatherv` instead.
+  The rounds are better for small contributions (up to ~10 KB per rank, what the Barnes-Hut summaries are: 20 against 40 ms at 104 ranks),
+  the native collective from about 16 KB per rank on Open MPI (96 ranks, 64 KB: 171 against 258 ms). Try both on a new machine;
+* the result is a `Vector` with the narrowest concrete element type the values share (`Vector{Any}` only for an empty list or mixed
+  types); `Dagger.allgather(tasks, T)` returns a `Vector{T}`;
 * call it from the driver, one call at a time (an MPI rule for collectives on one communicator);
 * a failed task makes **every** rank throw its exception, after all have taken part; the next call works;
 * it takes no task or reference ids, so it can be called wherever every rank calls it;
@@ -176,7 +179,7 @@ all_summaries = Dagger.allgather(summaries)        # Vector{Summary} on EVERY ra
 
 Measured on Fulda (Open MPI, 24 / 48 / 96 ranks, everything but the exchange finished, slowest rank, ms; noisy, single runs):
 
-| per rank | gather task + `fetch` | `Dagger.allgather`, rounds | `Dagger.allgather`, native (default) |
+| per rank | gather task + `fetch` | `Dagger.allgather`, rounds (default) | `Dagger.allgather`, native |
 |---|---|---|---|
 | 4 KB | 10 / 18 / 48 | 5.0 / 6.3 / 19 | 7.8 / 11 / 20 |
 | 16 KB | 14 / 40 / 166 | 7.5 / 22 / 121 | 14 / 18 / 39 |

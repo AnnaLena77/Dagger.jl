@@ -141,6 +141,15 @@ allgather(tasks::AbstractVector) = allgather(current_acceleration(), tasks)
 allgather(::Acceleration, tasks::AbstractVector) = [fetch(t) for t in tasks]
 
 """
+    allgather(tasks, T) -> Vector{T}
+
+[`allgather`](@ref) with the element type given: the values arrive over the wire untyped, so the vector of
+`allgather(tasks)` has the narrowest concrete element type its values allow (`Vector{Any}` for an empty list).
+Pass `T` when the code that uses the result needs a fixed type, e.g. `allgather(summaries, PartitionSummary)`.
+"""
+allgather(tasks::AbstractVector, ::Type{T}) where {T} = convert(Vector{T}, allgather(tasks))
+
+"""
     per_group(f, comm, T)
 
 [`per_rank`](@ref) on the communicator `comm` instead of the world: every member of `comm` calls it
