@@ -55,7 +55,7 @@ stack by cherry-pick (`feat/mpi-elide-scoped-chunks` carries copies of the cost-
 | `feat/mpi-elision-stats` | `Dagger.elision_stats()` / `reset_elision_stats!()` | shows why a task was planned in full |
 | `feat/mpi-group-graphs` | `with_group(f, comm)`, `per_group`, `free_group!`, elision inside groups | 64 ranks: shared graph 108.6 ms vs group graph 30.4 ms per step |
 | `perf/mpi-elide-typed-proc` | Typed processor in `elide_task!`, one scoped lookup in `take_ref_id!` | 19.3 -> 16.75 us per foreign task (-13 %) |
-| `feat/mpi-allgather` | `Dagger.allgather(tasks)`, Datadeps-in-group test, docs, AGENTS lessons | gather+fetch 408 -> 171 ms at 96 ranks, 64 KB per rank |
+| `feat/mpi-allgather` | `Dagger.allgather(tasks)` (concrete `Vector`, `allgather(tasks, T)`), Datadeps-in-group test, docs, AGENTS lessons | application: `tree.summarize` 66 -> 20 ms at 104 ranks; cluster: gather+fetch 408 -> 171 ms at 96 ranks, 64 KB per rank |
 
 At application level (Barnes-Hut, 1M bodies, 16 ranks x 32 threads, measured by the application team): stock Dagger 0.95 s per step,
 `integration/mpi-all` without switches 0.65 s, with owner elision 0.49 s; 4M bodies, 26 ranks: 2.14 s -> 1.10 s.
@@ -68,7 +68,7 @@ Set them on **every** rank (e.g. `mpiexec -x VAR`).
 |---|---|---|---|
 | `JULIA_DAGGER_ELIDE_FOREIGN_TASKS=1` | `Dagger.elide_foreign_tasks!(true)`: owner elision | off | `feat/mpi-owner-elision` |
 | `JULIA_DAGGER_FREE_MPI_THREADS=1` | `Dagger.free_mpi_threads!(true)`: tasks that name no thread run on any free thread of their rank | off | `feat/mpi-owner-elision` |
-| `JULIA_DAGGER_MPI_ALLGATHER=rounds` | `Dagger.allgather` uses hand-written rounds instead of `MPI_Iallgatherv` | native | `feat/mpi-allgather` |
+| `JULIA_DAGGER_MPI_ALLGATHER=native` | `Dagger.allgather` uses the library's `MPI_Iallgatherv` instead of the hand-written rounds | rounds | `feat/mpi-allgather` |
 
 Uniformity checking (`Dagger.check_uniformity!(true)`) switches elision off; keep it off for production runs and on in functional tests.
 
