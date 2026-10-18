@@ -52,6 +52,16 @@ later needs the task's data (an argument move or a `fetch`); a rank that never t
 `DArray` blocks do not defeat elision any more (they did before: every task reading a block was planned in full by every
 rank, 190-250 us; a rank that only plans such a task now pays about 50 us, measured on 4 ranks x 8 threads).
 
+**Why is my task not elided? Ask Dagger:** `Dagger.elision_stats()` returns, for this rank, how many of the tasks it planned were
+elided (`elided`), run here (`own_task`), or planned in full, with the reason: `no_owner_known` (the scope names no single rank),
+`not_failure_only`, `syncdeps_or_restore`, `return_type_not_concrete`, `function_not_plain`, `argument_not_positional`,
+`argument_participates` (this rank owns an argument, or its owner is unknown) and `scope_conflict`; `not_applicable` counts tasks seen
+while uniformity checks are on or in a rank-local graph. The counts are cumulative; call `Dagger.reset_elision_stats!()` at the start of a
+step and `Dagger.elision_stats()` at its end to get per-step numbers. They only count while the elision switch is on.
+
+Cost of the scope you pass: build `Dagger.scope(mpi_rank=r)` **once** and reuse the object (one call costs ~0.35 ms at 32 threads);
+a task with a rank scope costs a rank that only plans it about 3x an `ExactScope` task (60 vs 20 us at 32 threads), still far below a full plan.
+
 Practical rule: give each task an owner rank (`scope=Dagger.scope(mpi_rank=r)`), keep its inputs as chunks owned by
 that rank, and make the functions type-stable. Measured effect (1 node, 4 ranks): pinned round robin 40.9 -> 13.9 ms
 per 256 tasks, pinned to one other rank 46 -> 5.3 ms, fan-in tree 98 -> 40 ms.
