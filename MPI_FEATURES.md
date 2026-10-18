@@ -139,8 +139,13 @@ Rules:
   owns the chunk (it is then used in place); anything else is an error: hand data over with `per_group` or a shared task;
 * with the elision switch on, a member that neither runs a group task nor owns its data skips it exactly like in the world graph;
 * a failing group task is seen by every member that fetches it; the world and other groups are unaffected;
-* not supported yet: Datadeps and GPU chunks inside a group; each group communicator has its own broadcast relay (heavy if a
-  program creates thousands of groups).
+* not supported yet: Datadeps and GPU chunks inside a group;
+* **keep the number of live groups per rank small and call `free_group!` when a group is done.** Each group has a broadcast
+  relay of its own that polls and sleeps by itself, and idle relays take thread time from the workers. Measured on one machine
+  with 2 ranks x 4 threads (a dependent task hop in the *world* graph, 50 us without groups): 1 live group 56 us, 4 groups 67 us,
+  8 groups 91 us, 32 groups 255 us, 128 groups 897 us; after `free_group!` of all of them it is back at 49 us. A rank that is in a
+  few disjoint groups pays almost nothing; hundreds of live overlapping groups would. (Serving all groups from one relay was tried
+  and was slower: a probe per group per sweep costs more than the sleeping relays it replaces.)
 
 Measured (synthetic LET-like pattern, groups of 4, 240 tasks per group and step, 8 ranks x 8 threads per node, owner elision on,
 best of 5 steps), *before* elision inside groups: the shared graph costs 29.5 / 41.6 / 63.5 / 104.6 ms per step at 8 / 16 / 32 / 64
@@ -148,6 +153,26 @@ ranks (about 1.3 ms more per added rank: every rank still pays ~25 us for each f
 (rank 0 plans 240 tasks instead of 3840 at 64 ranks). **Use it only when planning is a large part of your step**: the Barnes-Hut application at 16-26 ranks
 spends 3-7 % of its step planning, and there a rank-local graph with unpinned workers was even slower (placement, not planning).
 It is for large rank counts.
+
+## 4c. `Dagger.allgather`: every rank gets the values of tasks owned by all ranks (branch `feat/mpi-allgather`)
+
+The pattern "one task per rank (a summary of its own data) -> one gather task with P arguments -> `fetch`" moves every result to one
+rank and then broadcasts the gathered vector. `Dagger.allgather` is the exchange itself:
+
+```julia
+summaries = [Dagger.@spawn(scope=owner_scope(r), return_type=Summary, summarize(part[r])) for r in 0:P-1]
+all_summaries = Dagger.allgather(summaries)        # Vector{Summary} on EVERY rank, in the order of the list
+```
+
+* SPMD collective: every rank calls it with the same list in the same order (inside `with_group` it works on the group);
+* each rank contributes the values of the tasks whose result it owns; the ranks pass them around in ceil(log2 P) rounds
+  (a dissemination allgather, any P), with cooperative waits, so it never parks the thread that runs the broadcast relay;
+* a failed task makes **every** rank throw its exception, after all have taken part; the next call works;
+* it takes no task or reference ids, so it can be called wherever every rank calls it;
+* results must be MPI chunks (the normal case under `accelerate!(:mpi)`); elsewhere `allgather(tasks)` is `fetch.(tasks)`.
+
+Measured on Fulda (gather task + `fetch` against `MPI.Allgather`, 4 KB per rank): 14.7 / 23 / 138 ms at 26 / 52 / 104 ranks against
+0.6 / 1.3 / 2.8 ms; at 16 KB 42 / 72 / 241 against 2 / 6 / 20 ms (see `LLM_info/STRATEGY.md` for the `Dagger.allgather` figures).
 
 ## 5. Measured costs (4 ranks x 16 threads, one node)
 
