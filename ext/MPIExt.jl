@@ -2897,7 +2897,7 @@ function mpi_task_scope(opts::Options)
     end
 end
 
-function mpi_scope_processor(opts::Options)
+function mpi_scope_processor(opts::Options)::Union{Nothing,MPIProcessor}
     scope = mpi_task_scope(opts)
     if scope isa Dagger.ExactScope
         proc = scope.processor
@@ -2936,7 +2936,7 @@ function mpi_union_scope_processor(scope::Dagger.UnionScope)
 end
 
 # At spawn time the scheduler has not yet filled in the execution or result scope
-function mpi_task_processor(opts::Options)
+function mpi_task_processor(opts::Options)::Union{Nothing,MPIProcessor}
     (opts.exec_scope === nothing && opts.result_scope === nothing) || return nothing
     return mpi_scope_processor(opts)
 end
