@@ -150,6 +150,7 @@ include("elide.jl")
 include("free_threads.jl")
 include("comm_self.jl")
 include("groups.jl")
+include("allgather.jl")
 
 @testset "Datadeps" begin
 

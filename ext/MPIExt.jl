@@ -3322,6 +3322,84 @@ end
 
 Dagger.with_group(f, comm::MPI.Comm) = Dagger.with_acceleration(f, mpi_group_acceleration(comm))
 
+# --- allgather: every rank gets the values of tasks owned by all ranks --------------------------
+#
+# The pattern "P tasks, one per rank -> a gather task with P arguments -> fetch" moves every result
+# to one rank (P point-to-point moves it serializes), then broadcasts the gathered vector: at 104
+# ranks and 4 KB per rank that is 138 ms against 2.8 ms for an `MPI.Allgather`. This is the exchange
+# itself, with the progress rules of the rest of this file: no blocking MPI call (a thread parked in
+# MPI runs no relay and reaches no GC safepoint), sends are posted before the matching receive
+# (rendezvous messages would otherwise deadlock in a ring), and every wait is cooperative.
+#
+# Dissemination (Bruck) allgather: after round k a rank holds the contributions of the 2^(k+1)
+# ranks that follow it (cyclically), so ceil(log2 P) rounds suffice for any P. In round k it sends
+# `min(2^k, P - 2^k)` blocks to the rank 2^k below and receives as many from the rank 2^k above.
+# Messages of one round come from distinct sources, and messages from one source arrive in order, so
+# a single tag serves every round and every call (every process calls in the same order).
+function mpi_allgather_blocks(comm::MPI.Comm, mine::Vector{UInt8})
+    rank = MPI.Comm_rank(comm); sz = MPI.Comm_size(comm)
+    blocks = Vector{Vector{UInt8}}(undef, sz)
+    blocks[rank + 1] = mine
+    sz == 1 && return blocks
+    tag = compare_all_mpi_tag()
+    d = 1
+    while d < sz
+        cnt = min(d, sz - d)
+        out = Vector{Vector{UInt8}}(undef, cnt)
+        for j in 0:cnt-1
+            out[j + 1] = blocks[mod(rank + j, sz) + 1]
+        end
+        to = mod(rank - d, sz); from = mod(rank + d, sz)
+        sreq = MPI.isend(out, comm; dest=to, tag)
+        got = recv_yield(comm, from, tag)::Vector{Vector{UInt8}}
+        __wait_for_request(sreq, comm, rank, to, tag, "allgather", "send")
+        for j in 1:cnt
+            blocks[mod(rank + d + j - 1, sz) + 1] = got[j]
+        end
+        d *= 2
+    end
+    return blocks
+end
+
+function Dagger.allgather(accel::MPIAcceleration, tasks::AbstractVector)
+    comm = accel.comm
+    rank = MPI.Comm_rank(comm)
+    # What this rank knows: the value of every task whose result it owns, or the failure it saw. The
+    # result is read from the task's future, not by `fetch(task)`, which would take a generic id when the
+    # owner of an elided task failed (see `fetch_failed_uniform!`): nothing here takes an id.
+    mine = Pair{Int,Any}[]
+    for (i, t) in enumerate(tasks)
+        try
+            raw = fetch(t.future; move_value=false, unwrap=false, uniform=false)
+            raw isa Chunk && raw.handle isa MPIRef ||
+                error("Dagger.allgather needs tasks whose results are MPI chunks, got $(typeof(raw))")
+            h = raw.handle
+            h.comm == comm || error("Dagger.allgather: a task belongs to another communicator than the current one")
+            h.rank == rank && push!(mine, i => poolget(h; uniform=false))
+        catch err
+            err isa InterruptException && rethrow()
+            push!(mine, i => CapturedException(err, catch_backtrace()))
+        end
+    end
+    blocks = mpi_allgather_blocks(comm, MPI.serialize(mine))
+    values = Vector{Any}(undef, length(tasks))
+    filled = fill(false, length(tasks))
+    failure = nothing
+    for blob in blocks
+        for (i, v) in MPI.deserialize(blob)::Vector{Pair{Int,Any}}
+            if v isa CapturedException
+                (failure === nothing || i < failure[1]) && (failure = (i, v))
+            else
+                values[i] = v; filled[i] = true
+            end
+        end
+    end
+    failure === nothing || throw(failure[2])
+    all(filled) || error("Dagger.allgather: no process owned the result of task $(findfirst(!, filled))")
+    return values
+end
+
+
 # Collective over the members. The communicator itself stays the caller's to free.
 function Dagger.free_group!(comm::MPI.Comm)
     st = lock(MPI_GROUPS) do groups

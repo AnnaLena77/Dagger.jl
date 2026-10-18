@@ -122,6 +122,8 @@ group_bad(x::Int) = x > 0 ? error("group failure") : x
                 # a member that does not run a task builds no thunk for it
                 @test all(i -> (ts[i].stub !== nothing) == (rank != mod(i, nranks)), 1:n)
                 @test [fetch(t) for t in ts] == [i + 1 for i in 1:n]
+                # every member of the group gets all values with one exchange inside the group
+                @test Dagger.with_group(() -> Dagger.allgather(ts), gall) == [i + 1 for i in 1:n]
                 @test allequal(MPI.Allgather(Int(ts[end].uid), gall))
                 st = Dagger.elision_stats()
                 @test st.elided == n - count(i -> mod(i, nranks) == rank, 1:n)
