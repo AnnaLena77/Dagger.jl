@@ -3383,16 +3383,18 @@ end
 # (`__wait_for_request` polls with `MPI.Test` and yields), so it never parks a thread inside MPI. MPI.jl 0.20 wraps the
 # blocking `Allgatherv` only, so the low-level `MPI.API` calls are used. Every rank must call it in the same order on a
 # communicator (an MPI rule for collectives): `Dagger.allgather` is called from the driver, one call at a time.
-# `JULIA_DAGGER_MPI_ALLGATHER=rounds` selects the hand-written rounds instead (set it on every rank). Measured on Fulda
-# (Open MPI, 24 / 48 / 96 ranks, everything but the exchange finished): the native collective is the best from 16 KB per
-# rank (96 ranks, 64 KB: 171 ms against 258 ms for the rounds and 408 ms for a gather task plus `fetch`) and about equal at
-# 4 KB (20 against 19 ms at 96 ranks); on MPICH on a laptop the rounds were twice as fast, so the choice depends on the
-# MPI implementation. The size of a contribution is not the same on every rank, so it cannot decide the algorithm.
+# `JULIA_DAGGER_MPI_ALLGATHER=native` (on every rank) selects the library's collective; the default is the hand-written rounds.
+# Measured on Fulda (Open MPI), slowest rank, ms, 24 / 48 / 96 ranks, everything but the exchange finished: 4 KB per rank
+# rounds 5.0 / 6.3 / 19 against native 7.8 / 11 / 20, 16 KB 7.5 / 22 / 121 against 14 / 18 / 39, 64 KB 34 / 43 / 258 against
+# 17 / 28 / 171. In the Barnes-Hut application (2.8 / 5.5 / 10.6 KB per rank at 104 / 52 / 26 ranks) the rounds took 20 / 15 ms
+# against 40 / 24 ms at 104 / 52 ranks. So the rounds are better for the small contributions this is meant for (and on MPICH
+# on a laptop), the native collective from about 16 KB per rank. A contribution's size is not the same on every rank, so it
+# cannot decide the algorithm per call.
 const MPI_ALLGATHER_NATIVE = Ref{Union{Bool,Nothing}}(nothing)
 function mpi_allgather_native()
     v = MPI_ALLGATHER_NATIVE[]
     if v === nothing
-        v = get(ENV, "JULIA_DAGGER_MPI_ALLGATHER", "native") != "rounds"
+        v = get(ENV, "JULIA_DAGGER_MPI_ALLGATHER", "rounds") == "native"
         MPI_ALLGATHER_NATIVE[] = v
     end
     return v
@@ -3468,7 +3470,8 @@ function Dagger.allgather(accel::MPIAcceleration, tasks::AbstractVector)
     end
     failure === nothing || throw(failure[2])
     all(filled) || error("Dagger.allgather: no process owned the result of task $(findfirst(!, filled))")
-    return values
+    # The values came over the wire untyped: narrow to the concrete type they share (`Vector{Any}` helps nobody)
+    return [v for v in values]
 end
 
 

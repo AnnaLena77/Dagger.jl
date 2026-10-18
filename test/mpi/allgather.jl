@@ -35,7 +35,7 @@ ag_bad(i::Int) = i > 0 ? error("allgather failure $i") : i
         Dagger.elide_foreign_tasks!(false)
     end
     MPIExt.MPI_ALLGATHER_FANOUT[] = 4
-    MPIExt.MPI_ALLGATHER_NATIVE[] = nothing          # the default again (native, unless the environment says otherwise)
+    MPIExt.MPI_ALLGATHER_NATIVE[] = nothing          # the default again (the rounds, unless the environment says otherwise)
     for elide in (true, false)
         Dagger.elide_foreign_tasks!(elide)
         try
@@ -48,6 +48,11 @@ ag_bad(i::Int) = i > 0 ? error("allgather failure $i") : i
                 # the order of the list decides the order of the result, whatever the owners are
                 vals2 = Dagger.allgather(reverse(ts))
                 @test vals2 == reverse(vals)
+                # the element type is the concrete one the values share, or the one asked for
+                @test eltype(vals) == Vector{Float64}
+                @test typeof(Dagger.allgather(ts, Vector{Float64})) == Vector{Vector{Float64}}
+                s = Dagger.allgather([Dagger.@spawn(scope=last_thread(mod(i, nranks)), return_type=Int, ag_bad(0)) for i in 1:nranks])
+                @test s isa Vector{Int}
             end
             @testset "empty list and a large payload, elision=$elide" begin
                 @test Dagger.allgather(Dagger.DTask[]) == []
