@@ -107,6 +107,47 @@ group_bad(x::Int) = x > 0 ? error("group failure") : x
         @test allequal(MPI.Allgather(Int(t.uid), comm))
     end
 
+    @testset "owner elision works inside a group" begin
+        if nranks >= 3
+            Dagger.check_uniformity!(false)
+            Dagger.elide_foreign_tasks!(true)
+            try
+                gall = MPI.Comm_split(comm, 0, rank)           # one group with every rank (group rank == world rank)
+                Dagger.reset_elision_stats!()
+                n = 2 * nranks
+                ts = Dagger.with_group(gall) do
+                    [Dagger.@spawn(scope=gscope(gall, mod(i, nranks)), group_inc(i)) for i in 1:n]
+                end
+                foreach(wait, ts)
+                # a member that does not run a task builds no thunk for it
+                @test all(i -> (ts[i].stub !== nothing) == (rank != mod(i, nranks)), 1:n)
+                @test [fetch(t) for t in ts] == [i + 1 for i in 1:n]
+                @test allequal(MPI.Allgather(Int(ts[end].uid), gall))
+                st = Dagger.elision_stats()
+                @test st.elided == n - count(i -> mod(i, nranks) == rank, 1:n)
+                @test st.own_task == count(i -> mod(i, nranks) == rank, 1:n)
+                # a failure reaches every member, and the ids stay in agreement afterwards
+                bad = Dagger.with_group(gall) do
+                    Dagger.@spawn scope=gscope(gall, 1) group_bad(1)
+                end
+                @test_throws Exception fetch(bad)
+                t2 = Dagger.with_group(gall) do
+                    Dagger.@spawn scope=gscope(gall, 0) group_inc(41)
+                end
+                @test fetch(t2) == 42
+                @test allequal(MPI.Allgather(Int(t2.uid), gall))
+                # the world did not notice any of it
+                t = Dagger.@spawn scope=pinned(nranks-1) group_inc(7)
+                @test fetch(t) == 8
+                @test allequal(MPI.Allgather(Int(t.uid), comm))
+                Dagger.free_group!(gall)
+            finally
+                Dagger.elide_foreign_tasks!(false)
+                Dagger.check_uniformity!(true)
+            end
+        end
+    end
+
     Dagger.free_group!(stage1)
     Dagger.free_group!(stage2)
     MPI.Barrier(comm)

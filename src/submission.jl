@@ -544,7 +544,9 @@ function eager_spawn(spec::DTaskSpec)
     if isconcretetype(metadata.return_type)
         spec.options.return_type = metadata.return_type
     end
-    return DTask(uid, future, metadata)
+    task = DTask(uid, future, metadata)
+    task.accel = spec.options.acceleration
+    return task
 end
 
 chunktype(t::DTask) = t.metadata.return_type

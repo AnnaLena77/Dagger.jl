@@ -83,9 +83,12 @@ mutable struct DTask
     # not known at spawn time. Unlike `owner` it changes nothing about `fetch`; it only lets an
     # acceleration decide about the *consumers* of the result (see `note_chunk_placement!`).
     placed::Int
+    # The acceleration the task was spawned under (`nothing`: the default one). An acceleration with several
+    # task graphs (MPI: the world, rank-local graphs, groups) needs it to tell which graph a task belongs to.
+    accel::Any
     thunk_ref::DRef
 
-    DTask(uid, future, metadata) = new(uid, future, metadata, nothing, -1, -1)
+    DTask(uid, future, metadata) = new(uid, future, metadata, nothing, -1, -1, nothing)
 end
 
 const EagerThunk = DTask
@@ -111,7 +114,7 @@ function Base.fetch(t::DTask; raw=false, move_value=!raw, unwrap=!raw, uniform=f
         value = try
             fetch(t.future; move_value=false, unwrap=false, uniform)
         catch
-            fetch_failed_uniform!(current_acceleration())
+            fetch_failed_uniform!(t.accel === nothing ? current_acceleration() : t.accel)
             rethrow()
         end
         return move_value ? move(OSProc(), value) : value

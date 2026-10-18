@@ -2950,13 +2950,17 @@ mpi_failure_only(::Nothing) = false
 function mpi_failure_only(opts::Options)
     Dagger.ELIDE_FOREIGN_TASKS[] && !CHECK_UNIFORMITY[] && opts.tag === nothing || return false
     proc = mpi_scope_processor(opts)
-    return proc !== nothing && proc.comm == MPI.COMM_WORLD
+    return proc !== nothing && (proc.comm == MPI.COMM_WORLD || mpi_is_group(proc.comm))
 end
 
 # Whether `local_rank` takes part in moving `v` to the task's rank, or cannot tell
-function mpi_arg_participates(v, local_rank::Int)
+function mpi_arg_participates(v, local_rank::Int, comm::MPI.Comm)
     if v isa Dagger.DTask
-        v.stub !== nothing && return mpi_arg_participates(v.stub, local_rank)
+        v.stub !== nothing && return mpi_arg_participates(v.stub, local_rank, comm)
+        # Ranks are those of the communicator the task belongs to: an argument of another communicator has no
+        # rank here, so the rank cannot tell whether it takes part
+        a = v.accel
+        (a === nothing ? comm == MPI.COMM_WORLD : (a isa MPIAcceleration && a.comm == comm)) || return true
         # `placed`: the rank a block of an array was put on (it does not make the task failure-only)
         where = v.owner >= 0 ? v.owner : v.placed
         return where < 0 || where == local_rank
@@ -2964,6 +2968,7 @@ function mpi_arg_participates(v, local_rank::Int)
         # N.B. A scope restriction on the chunk (a `DArray` block has one) only matters through
         # `constrain(task scope, chunk scope)`, which `elide_task!` checks for the task as a whole
         v.handle isa MPIRef || return true
+        v.handle.comm == comm || return true
         return v.handle.rank == local_rank
     elseif v isa Dagger.WeakChunk
         return true
@@ -2989,8 +2994,13 @@ end
 
 # A fetch that throws on the owner still has to take the generic id that the
 # broadcast of a successful fetch takes on every other rank (see `poolget`)
-function Dagger.fetch_failed_uniform!(::MPIAcceleration)
-    Dagger.ELIDE_FOREIGN_TASKS[] && !CHECK_UNIFORMITY[] && take_ref_id!()
+function Dagger.fetch_failed_uniform!(accel::MPIAcceleration)
+    Dagger.ELIDE_FOREIGN_TASKS[] && !CHECK_UNIFORMITY[] || return
+    # The id a successful fetch takes is a generic id of the communicator the task belongs to (and none at all
+    # for a communicator of size one): take the same one, wherever the fetch is called from
+    MPI.Comm_size(accel.comm) == 1 && return
+    cur = Dagger.current_acceleration()
+    cur isa MPIAcceleration && cur.comm == accel.comm ? take_ref_id!() : Dagger.with_acceleration(take_ref_id!, accel)
     return
 end
 
@@ -3015,12 +3025,16 @@ Dagger.task_processor_preference(::MPIAcceleration, req::MPIPlacementRequest, st
 
 # Rank that owns `v`, `nothing` for a plain value (the scheduler ignores those when it
 # looks for the owner), `-1` when it cannot be told at spawn time
-function mpi_arg_owner(v)
+function mpi_arg_owner(v, comm::MPI.Comm)
     if v isa Dagger.DTask
-        v.stub !== nothing && return mpi_arg_owner(v.stub)
+        v.stub !== nothing && return mpi_arg_owner(v.stub, comm)
+        # ranks are those of the communicator the task belongs to
+        a = v.accel
+        (a === nothing ? comm == MPI.COMM_WORLD : (a isa MPIAcceleration && a.comm == comm)) || return -1
         return v.owner >= 0 ? v.owner : v.placed
     elseif v isa Chunk
         v.handle isa MPIRef || return -1
+        v.handle.comm == comm || return -1
         return v.handle.rank
     elseif v isa Dagger.WeakChunk
         return -1
@@ -3049,7 +3063,7 @@ function mpi_preplace!(accel::MPIAcceleration, spec, task)
     for i in 2:length(fargs)
         arg = fargs[i]
         Dagger.ispositional(arg) || return false
-        owner = mpi_arg_owner(Dagger.value(arg))
+        owner = mpi_arg_owner(Dagger.value(arg), accel.comm)
         owner === nothing && continue
         owner < 0 && return false
         pref === nothing && (pref = owner)
@@ -3138,7 +3152,7 @@ end
 function Dagger.elide_task!(accel::MPIAcceleration, spec, task)
     CHECK_UNIFORMITY[] && return elide_no(E_NOT_APPLICABLE)
     # Only tasks of the world are planned by every rank; a rank-local graph has nothing to elide
-    accel.comm == MPI.COMM_WORLD || return elide_no(E_NOT_APPLICABLE)
+    accel.comm == MPI.COMM_WORLD || mpi_is_group(accel.comm) || return elide_no(E_NOT_APPLICABLE)
     opts = spec.options
     # Tasks without a scope are placed here, so that every rank knows the owner
     if mpi_task_processor(opts) === nothing && opts.compute_scope === nothing && opts.scope === nothing
@@ -3162,7 +3176,7 @@ function Dagger.elide_task!(accel::MPIAcceleration, spec, task)
     for i in 2:length(fargs)
         arg = fargs[i]
         Dagger.ispositional(arg) || return elide_no(E_ARGUMENT_NOT_POSITIONAL)
-        mpi_arg_participates(Dagger.value(arg), local_rank) && return elide_no(E_ARGUMENT_PARTICIPATES)
+        mpi_arg_participates(Dagger.value(arg), local_rank, proc.comm) && return elide_no(E_ARGUMENT_PARTICIPATES)
     end
     mpi_chunk_scopes_fit(opts, fargs) || return elide_no(E_SCOPE_CONFLICT)
     # The placeholder `execute!` stamps on a non-owner, with the id it would get
