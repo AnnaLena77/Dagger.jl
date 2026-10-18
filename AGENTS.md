@@ -925,3 +925,15 @@ lesson.
    four blocks of a small array sit on rank 0 and the probe measured nothing. And a chunk's
    scope only matters through `constrain(task scope, chunk scope)`: check that chain, do not
    treat any scope restriction as a reason to plan in full.
+
+87. **A check added to the per-task path must not scale with the size of a rank-level scope.**
+   `Dagger.scope(mpi_rank=r)` is a `UnionScope` with one `ExactScope` per thread of the rank, so
+   `constrain`, `objectid`, `===` and `==` on it cost time proportional to the thread count. A
+   `constrain(compute_scope, result_scope)` that I added to the elision check for every task made
+   a foreign rank's planning cost of a rank-scoped task 69-76 us instead of 38-43 us at 16
+   threads (123-130 us at 32) against ~20 us for an `ExactScope`; the result scope is always
+   `nothing` there, so the call was pure cost. Do such work only where it can change the answer
+   (here: only for chunk arguments that carry a restriction), and after touching elision compare
+   the foreign-rank cost of an `ExactScope` task with that of a rank-scoped one (probe
+   `LLM_info/bench/scope_cost.jl`, 16 and 32 threads per rank). Also: building a rank scope costs
+   ~0.35 ms at 32 threads; build it once.
