@@ -3383,7 +3383,20 @@ end
 # (`__wait_for_request` polls with `MPI.Test` and yields), so it never parks a thread inside MPI. MPI.jl 0.20 wraps the
 # blocking `Allgatherv` only, so the low-level `MPI.API` calls are used. Every rank must call it in the same order on a
 # communicator (an MPI rule for collectives): `Dagger.allgather` is called from the driver, one call at a time.
-const MPI_ALLGATHER_NATIVE = Ref(true)
+# `JULIA_DAGGER_MPI_ALLGATHER=rounds` selects the hand-written rounds instead (set it on every rank). Measured on Fulda
+# (Open MPI, 24 / 48 / 96 ranks, everything but the exchange finished): the native collective is the best from 16 KB per
+# rank (96 ranks, 64 KB: 171 ms against 258 ms for the rounds and 408 ms for a gather task plus `fetch`) and about equal at
+# 4 KB (20 against 19 ms at 96 ranks); on MPICH on a laptop the rounds were twice as fast, so the choice depends on the
+# MPI implementation. The size of a contribution is not the same on every rank, so it cannot decide the algorithm.
+const MPI_ALLGATHER_NATIVE = Ref{Union{Bool,Nothing}}(nothing)
+function mpi_allgather_native()
+    v = MPI_ALLGATHER_NATIVE[]
+    if v === nothing
+        v = get(ENV, "JULIA_DAGGER_MPI_ALLGATHER", "native") != "rounds"
+        MPI_ALLGATHER_NATIVE[] = v
+    end
+    return v
+end
 
 function mpi_allgather_blocks_native(comm::MPI.Comm, mine::Vector{UInt8})
     rank = MPI.Comm_rank(comm); sz = MPI.Comm_size(comm)
@@ -3440,7 +3453,7 @@ function Dagger.allgather(accel::MPIAcceleration, tasks::AbstractVector)
         end
     end
     blob = MPI.serialize(mine)
-    blocks = MPI_ALLGATHER_NATIVE[] ? mpi_allgather_blocks_native(comm, blob) : mpi_allgather_blocks(comm, blob)
+    blocks = mpi_allgather_native() ? mpi_allgather_blocks_native(comm, blob) : mpi_allgather_blocks(comm, blob)
     values = Vector{Any}(undef, length(tasks))
     filled = fill(false, length(tasks))
     failure = nothing
