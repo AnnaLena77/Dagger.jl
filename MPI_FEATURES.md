@@ -113,6 +113,42 @@ Rules:
 A local task costs what a shared pinned task costs (about 40 ms per 256 tasks), so use local graphs for *data-dependent
 or rank-specific* work, not to save planning time (elision does that for shared tasks).
 
+## 4b. Group graphs (branch `feat/mpi-group-graphs`, not in `integration/mpi-all` yet)
+
+A rank-local graph generalized to **k ranks**: a task graph on a communicator of k ranks (`MPI.Comm_split`) that only
+its members plan and run. Ranks outside the group do not build its tasks at all, and the group has its own task ids and
+tags, so the world's ids stay in agreement however many tasks each group spawns (different groups may even spawn different numbers).
+
+```julia
+g = MPI.Comm_split(MPI.COMM_WORLD, color, key)         # e.g. color = rank ÷ 4: groups of 4 ranks
+res = Dagger.with_group(g) do                          # every member runs the same code inside the block
+    ts = [Dagger.@spawn(scope=my_group_scope(i), work(i)) for i in 1:n]     # n may differ between groups
+    fetch.(ts)                                         # fetch inside the block
+end
+chunks = Dagger.per_group(g, Vector{Float64}) do       # like per_rank, on the group: one chunk per member
+    Dagger.@spawn(build_local(data))
+end
+Dagger.free_group!(g)                                  # collective over the members, when the group is no longer used
+```
+
+Rules:
+* every member of `g` runs the same sequence of `@spawn`s inside the block (SPMD **within the group**);
+* a processor of a member of the group is named through the group's own processor list
+  (`Dagger.get_processors(MPIClusterProc(g))`, see `test/mpi/groups.jl`; `ExactScope` of one of them);
+* data crosses between the world and a group, or between two groups, only for a rank that is a member of both and
+  owns the chunk (it is then used in place); anything else is an error: hand data over with `per_group` or a shared task;
+* with the elision switch on, a member that neither runs a group task nor owns its data skips it exactly like in the world graph;
+* a failing group task is seen by every member that fetches it; the world and other groups are unaffected;
+* not supported yet: Datadeps and GPU chunks inside a group; each group communicator has its own broadcast relay (heavy if a
+  program creates thousands of groups).
+
+Measured (synthetic LET-like pattern, groups of 4, 240 tasks per group and step, 8 ranks x 8 threads per node, owner elision on,
+best of 5 steps), *before* elision inside groups: the shared graph costs 29.5 / 41.6 / 63.5 / 104.6 ms per step at 8 / 16 / 32 / 64
+ranks (about 1.3 ms more per added rank: every rank still pays ~25 us for each foreign task), the group graph stays flat at 45-47 ms
+(rank 0 plans 240 tasks instead of 3840 at 64 ranks). **Use it only when planning is a large part of your step**: the Barnes-Hut application at 16-26 ranks
+spends 3-7 % of its step planning, and there a rank-local graph with unpinned workers was even slower (placement, not planning).
+It is for large rank counts.
+
 ## 5. Measured costs (4 ranks x 16 threads, one node)
 
 | | plain | with both switches |
@@ -147,4 +183,4 @@ shows it, and the log lines containing `Non-uniform value`, `Hit probable hang` 
 `fix/mpi-space-hash` · `feat/mpi-owner-elision` (elision + free threads) · `feat/mpi-comm-self` (rank-local graphs) ·
 `perf/mpi-pin-runner` (pinned MPI tasks) · `fix/mpi-reftid-leak` · `feat/mpi-local-datadeps` ·
 `feat/mpi-elide-scoped-chunks` · `feat/mpi-elide-darray-blocks` (elision for scope-restricted chunks and `DArray` blocks) ·
-`bench/tasks-suite` (the `tasks` benchmark suite, `benchmark/suites/tasks.jl`) · `integration/mpi-all` (all of it).
+`feat/mpi-group-graphs` (group graphs, section 4b) · `bench/tasks-suite` (the `tasks` benchmark suite, `benchmark/suites/tasks.jl`) · `integration/mpi-all` (all of it).
