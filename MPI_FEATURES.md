@@ -113,7 +113,7 @@ Rules:
 A local task costs what a shared pinned task costs (about 40 ms per 256 tasks), so use local graphs for *data-dependent
 or rank-specific* work, not to save planning time (elision does that for shared tasks).
 
-## 4b. Group graphs (branch `feat/mpi-group-graphs`, not in `integration/mpi-all` yet)
+## 4b. Group graphs (branch `feat/mpi-group-graphs`, included in `integration/mpi-all`)
 
 A rank-local graph generalized to **k ranks**: a task graph on a communicator of k ranks (`MPI.Comm_split`) that only
 its members plan and run. Ranks outside the group do not build its tasks at all, and the group has its own task ids and
@@ -183,4 +183,4 @@ shows it, and the log lines containing `Non-uniform value`, `Hit probable hang` 
 `fix/mpi-space-hash` · `feat/mpi-owner-elision` (elision + free threads) · `feat/mpi-comm-self` (rank-local graphs) ·
 `perf/mpi-pin-runner` (pinned MPI tasks) · `fix/mpi-reftid-leak` · `feat/mpi-local-datadeps` ·
 `feat/mpi-elide-scoped-chunks` · `feat/mpi-elide-darray-blocks` (elision for scope-restricted chunks and `DArray` blocks) ·
-`feat/mpi-group-graphs` (group graphs, section 4b) · `bench/tasks-suite` (the `tasks` benchmark suite, `benchmark/suites/tasks.jl`) · `integration/mpi-all` (all of it).
+`feat/mpi-group-graphs` (group graphs, section 4b) · `perf/mpi-elide-typed-proc` (13-14 % cheaper planning of a task this rank only plans) · `bench/tasks-suite` (the `tasks` benchmark suite, `benchmark/suites/tasks.jl`) · `integration/mpi-all` (all of it).
