@@ -3378,6 +3378,47 @@ function mpi_allgather_blocks(comm::MPI.Comm, mine::Vector{UInt8})
     return blocks
 end
 
+# The same exchange with the library's own non-blocking collective (MPI_Iallgather for the sizes, MPI_Iallgatherv for the
+# bytes), which the MPI implementation runs with its tuned algorithm; this file only waits for the request, cooperatively
+# (`__wait_for_request` polls with `MPI.Test` and yields), so it never parks a thread inside MPI. MPI.jl 0.20 wraps the
+# blocking `Allgatherv` only, so the low-level `MPI.API` calls are used. Every rank must call it in the same order on a
+# communicator (an MPI rule for collectives): `Dagger.allgather` is called from the driver, one call at a time.
+const MPI_ALLGATHER_NATIVE = Ref(true)
+
+function mpi_allgather_blocks_native(comm::MPI.Comm, mine::Vector{UInt8})
+    rank = MPI.Comm_rank(comm); sz = MPI.Comm_size(comm)
+    sz == 1 && return Vector{UInt8}[mine]
+    # 1. everyone's size
+    counts = Vector{Cint}(undef, sz)
+    sbuf = MPI.Buffer(Ref(Cint(length(mine))))
+    rbuf = MPI.UBuffer(counts, 1)
+    req = MPI.Request()
+    GC.@preserve counts begin
+        MPI.API.MPI_Iallgather(sbuf.data, sbuf.count, sbuf.datatype, rbuf.data, rbuf.count, rbuf.datatype, comm, req)
+        MPI.setbuffer!(req, (sbuf, rbuf))
+        __wait_for_request(req, comm, rank, -1, UInt32(0), "allgather_sizes", "collective")
+    end
+    # 2. the bytes
+    total = sum(counts; init=0)
+    recv = Vector{UInt8}(undef, total)
+    vbuf = MPI.VBuffer(recv, counts)
+    sbuf2 = MPI.Buffer(mine)
+    req2 = MPI.Request()
+    GC.@preserve recv mine begin
+        MPI.API.MPI_Iallgatherv(sbuf2.data, sbuf2.count, sbuf2.datatype, vbuf.data, vbuf.counts, vbuf.displs, vbuf.datatype, comm, req2)
+        MPI.setbuffer!(req2, (sbuf2, vbuf))
+        __wait_for_request(req2, comm, rank, -1, UInt32(0), "allgather", "collective")
+    end
+    blocks = Vector{Vector{UInt8}}(undef, sz)
+    off = 0
+    for r in 1:sz
+        n = Int(counts[r])
+        blocks[r] = recv[off+1:off+n]
+        off += n
+    end
+    return blocks
+end
+
 function Dagger.allgather(accel::MPIAcceleration, tasks::AbstractVector)
     comm = accel.comm
     rank = MPI.Comm_rank(comm)
@@ -3398,7 +3439,8 @@ function Dagger.allgather(accel::MPIAcceleration, tasks::AbstractVector)
             push!(mine, i => CapturedException(err, catch_backtrace()))
         end
     end
-    blocks = mpi_allgather_blocks(comm, MPI.serialize(mine))
+    blob = MPI.serialize(mine)
+    blocks = MPI_ALLGATHER_NATIVE[] ? mpi_allgather_blocks_native(comm, blob) : mpi_allgather_blocks(comm, blob)
     values = Vector{Any}(undef, length(tasks))
     filled = fill(false, length(tasks))
     failure = nothing
