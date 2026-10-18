@@ -912,3 +912,16 @@ lesson.
    for it. Several "causes" were ruled out one at a time before the real ones
    showed up; per-task start and fetch timestamps found them faster than any
    profile.
+
+86. **`DTask.owner` is not a place marker; use `DTask.placed` to say where a result lives.**
+   `owner >= 0` also switches `fetch` onto the failure-only path of elided tasks, which is wrong
+   for tasks of a Datadeps region. Under MPI the tasks that make the blocks of a `DArray` are
+   such tasks (tagged, not elidable, no owner), so every task reading a block was planned in
+   full by every rank (181 us against 28 us for a `per_rank` chunk). The block grid is the same
+   on every rank, so `emit_chunk_tasks!` now records each block's rank (`placed`, through
+   `note_chunk_placement!`) and the elision logic reads that. When probing elision, take the
+   owner of a block from the real chunk (`fetch(t; raw=true).handle.rank`), not from a guessed
+   round robin: the default grid fills processors rank by rank, so on 4 ranks x 8 threads all
+   four blocks of a small array sit on rank 0 and the probe measured nothing. And a chunk's
+   scope only matters through `constrain(task scope, chunk scope)`: check that chain, do not
+   treat any scope restriction as a reason to plan in full.
