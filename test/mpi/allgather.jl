@@ -8,6 +8,17 @@ ag_bad(i::Int) = i > 0 ? error("allgather failure $i") : i
     last_thread(r) = Dagger.ExactScope(last(sort(filter(p -> p.rank == r && p.innerProc isa Dagger.ThreadProc, mpi_procs());
                                                   by=p -> p.innerProc.tid)))
     Dagger.check_uniformity!(false)
+    # The number of partners per round decides how many rounds a rank takes; every fanout must give the same answer
+    @testset "fanout $k" for k in (1, 2, 3, 4)
+        MPIExt.MPI_ALLGATHER_FANOUT[] = k
+        Dagger.elide_foreign_tasks!(true)
+        n = 2 * nranks + 1
+        ts = [Dagger.@spawn(scope=last_thread(mod(i, nranks)), return_type=Vector{Float64}, ag_make(i, 50 + i)) for i in 1:n]
+        vals = Dagger.allgather(ts)
+        @test all(i -> vals[i] == fill(Float64(i), 50 + i), 1:n)
+        Dagger.elide_foreign_tasks!(false)
+    end
+    MPIExt.MPI_ALLGATHER_FANOUT[] = 4
     for elide in (true, false)
         Dagger.elide_foreign_tasks!(elide)
         try

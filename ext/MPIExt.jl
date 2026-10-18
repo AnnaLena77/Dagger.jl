@@ -3331,32 +3331,49 @@ Dagger.with_group(f, comm::MPI.Comm) = Dagger.with_acceleration(f, mpi_group_acc
 # MPI runs no relay and reaches no GC safepoint), sends are posted before the matching receive
 # (rendezvous messages would otherwise deadlock in a ring), and every wait is cooperative.
 #
-# Dissemination (Bruck) allgather: after round k a rank holds the contributions of the 2^(k+1)
-# ranks that follow it (cyclically), so ceil(log2 P) rounds suffice for any P. In round k it sends
-# `min(2^k, P - 2^k)` blocks to the rank 2^k below and receives as many from the rank 2^k above.
-# Messages of one round come from distinct sources, and messages from one source arrive in order, so
-# a single tag serves every round and every call (every process calls in the same order).
+# Dissemination allgather with fanout k: before a round a rank holds the contributions of the `have` ranks that
+# follow it (cyclically), itself first. In the round it sends its first `min(have, P - j*have)` blocks to the rank
+# j*have below it and receives as many from the rank j*have above it, for j = 1..k, so it holds (k+1)*have blocks
+# afterwards: ceil(log_(k+1) P) rounds for any P. One round is one cooperative wait chain (about 0.1-0.2 ms on a
+# laptop, more on a loaded node: every wait goes through `yield` and shares its thread with the relay), so the
+# partners of a round are served concurrently: all sends are posted, then all receives are waited for.
+# Messages of a round come from distinct sources, and messages from one source arrive in order, so a single tag
+# serves every round and every call (every process calls in the same order).
+const MPI_ALLGATHER_FANOUT = Ref(4)
+
 function mpi_allgather_blocks(comm::MPI.Comm, mine::Vector{UInt8})
     rank = MPI.Comm_rank(comm); sz = MPI.Comm_size(comm)
     blocks = Vector{Vector{UInt8}}(undef, sz)
     blocks[rank + 1] = mine
     sz == 1 && return blocks
     tag = compare_all_mpi_tag()
-    d = 1
-    while d < sz
-        cnt = min(d, sz - d)
-        out = Vector{Vector{UInt8}}(undef, cnt)
-        for j in 0:cnt-1
-            out[j + 1] = blocks[mod(rank + j, sz) + 1]
+    k = max(1, MPI_ALLGATHER_FANOUT[])
+    have = 1
+    while have < sz
+        sreqs = Tuple{MPI.Request,Int}[]
+        for j in 1:k
+            cnt = min(have, sz - j * have)
+            cnt <= 0 && break
+            out = Vector{Vector{UInt8}}(undef, cnt)
+            for m in 0:cnt-1
+                out[m + 1] = blocks[mod(rank + m, sz) + 1]
+            end
+            to = mod(rank - j * have, sz)
+            push!(sreqs, (MPI.isend(out, comm; dest=to, tag), to))
         end
-        to = mod(rank - d, sz); from = mod(rank + d, sz)
-        sreq = MPI.isend(out, comm; dest=to, tag)
-        got = recv_yield(comm, from, tag)::Vector{Vector{UInt8}}
-        __wait_for_request(sreq, comm, rank, to, tag, "allgather", "send")
-        for j in 1:cnt
-            blocks[mod(rank + d + j - 1, sz) + 1] = got[j]
+        for j in 1:k
+            cnt = min(have, sz - j * have)
+            cnt <= 0 && break
+            from = mod(rank + j * have, sz)
+            got = recv_yield(comm, from, tag)::Vector{Vector{UInt8}}
+            for m in 1:cnt
+                blocks[mod(rank + j * have + m - 1, sz) + 1] = got[m]
+            end
         end
-        d *= 2
+        for (req, to) in sreqs
+            __wait_for_request(req, comm, rank, to, tag, "allgather", "send")
+        end
+        have = min(have * (k + 1), sz)
     end
     return blocks
 end
