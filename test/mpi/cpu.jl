@@ -151,6 +151,7 @@ include("free_threads.jl")
 include("comm_self.jl")
 include("groups.jl")
 include("allgather.jl")
+include("struct_transport.jl")
 
 @testset "Datadeps" begin
 
