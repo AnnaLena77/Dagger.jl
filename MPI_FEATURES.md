@@ -188,6 +188,18 @@ Measured on Fulda (Open MPI, 24 / 48 / 96 ranks, everything but the exchange fin
 So 2-7x faster than the pattern it replaces; a raw `MPI.Allgather` is still faster (1-14 ms at 4 KB), the rest is the cooperative waiting
 and the (de)serialization of the contributions.
 
+## 4d. Raw transport of structs and the scheduler wake-up (always on)
+
+* **Structs with bit arrays travel as raw buffers.** A concrete struct that holds at least one plain `Array` of bits (directly or inside an
+  immutable struct field) is sent between ranks as raw buffers plus a small header instead of through `serialize`; `String`, `Dict`,
+  `Vector{Any}` and other fields ride in the header as before, a value in which one array is reachable twice stays on the old path (the
+  sharing survives), arrays of arrays (`Vector{Vector{T}}`) are not covered. Hooks you define yourself (`Dagger.inplace_mpi_parts` /
+  `inplace_mpi_alloc` / `inplace_mpi_build`) take precedence. 40 MB between two Fulda nodes: 580 -> 210 ms.
+* **Fewer wake-ups in the scheduler.** After an enqueue only parked runners that can take the task are woken, at most one per task, and
+  none for a task with an `ExactScope`. One process, 64 threads: unscoped 3.3k -> 5.6k tasks/s, pinned 5.5k -> 7.2k. The ceiling of one
+  process stays at ~7-10k tasks/s (about 140 us of serial work per task in the submitting thread): tasks shorter than about
+  `threads x 140 us` cannot keep all threads busy, so use coarser tasks or several ranks per node.
+
 ## 5. Measured costs (4 ranks x 16 threads, one node)
 
 | | plain | with both switches |

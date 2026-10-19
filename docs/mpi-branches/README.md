@@ -3,7 +3,7 @@
 This directory describes the branches of the fork `AnnaLena77/Dagger.jl` that make Dagger's MPI backend (SPMD: every rank runs
 the same program and plans every task) cheaper and scalable, developed for a Barnes-Hut code that is to run on 100+ nodes.
 Each branch has its own page here, named after the branch with `/` replaced by `__`.
-**Use `integration/mpi-all`: it contains everything.** The single branches exist so that each change can be reviewed, tested and
+**Use `integration/mpi-all`: it contains everything** (the last two branches, `feat/mpi-struct-raw-transport` and `perf/sched-targeted-kicks`, were merged after the targeted tests; the complete `test/mpi/cpu.jl` for the transport change ran on `feat/mpi-struct-raw-transport` only). The single branches exist so that each change can be reviewed, tested and
 proposed upstream on its own.
 
 All measurements are from the Fulda cluster (AMD Opteron 6272, 64 cores/node, Open MPI, Julia 1.13) unless a page says otherwise.
@@ -29,7 +29,10 @@ master
                                               `-- feat/mpi-elision-stats    Dagger.elision_stats()
                                                    `-- feat/mpi-group-graphs     with_group, per_group, elision in groups
                                                         `-- perf/mpi-elide-typed-proc   -13..-14 % planning cost per foreign task
-                                                             `-- feat/mpi-allgather = integration/mpi-all
+                                                             `-- feat/mpi-allgather
+                                                                  |-- feat/mpi-struct-raw-transport   structs of bit arrays travel as raw buffers
+                                                                  `-- perf/sched-targeted-kicks       wake only runners that can take the task
+                                                                       (both merged: integration/mpi-all)
 ```
 
 The stacked part is linear: each branch contains all branches above it. The four independent branches are merged into the
@@ -56,6 +59,8 @@ stack by cherry-pick (`feat/mpi-elide-scoped-chunks` carries copies of the cost-
 | `feat/mpi-group-graphs` | `with_group(f, comm)`, `per_group`, `free_group!`, elision inside groups | 64 ranks: shared graph 108.6 ms vs group graph 30.4 ms per step |
 | `perf/mpi-elide-typed-proc` | Typed processor in `elide_task!`, one scoped lookup in `take_ref_id!` | 19.3 -> 16.75 us per foreign task (-13 %) |
 | `feat/mpi-allgather` | `Dagger.allgather(tasks)` (concrete `Vector`, `allgather(tasks, T)`), Datadeps-in-group test, docs, AGENTS lessons | application: `tree.summarize` 66 -> 20 ms at 104 ranks; cluster: gather+fetch 408 -> 171 ms at 96 ranks, 64 KB per rank |
+| `feat/mpi-struct-raw-transport` | A struct holding bit arrays is sent as raw buffers automatically (other fields in the header, shared arrays and nested structs handled) | 40 MB struct between two nodes 580 -> 210 ms; one node 580 -> 174 ms |
+| `perf/sched-targeted-kicks` | After an enqueue wake only parked runners that can take the task, at most one per task (no kick for `ExactScope`) | one process, 64 threads: unscoped 3.3k -> 5.6k tasks/s (+69 %), pinned 5.5k -> 7.2k (+32 %) |
 
 At application level (Barnes-Hut, 1M bodies, 16 ranks x 32 threads, measured by the application team): stock Dagger 0.95 s per step,
 `integration/mpi-all` without switches 0.65 s, with owner elision 0.49 s; 4M bodies, 26 ranks: 2.14 s -> 1.10 s.
