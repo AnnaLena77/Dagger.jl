@@ -3,7 +3,7 @@
 This directory describes the branches of the fork `AnnaLena77/Dagger.jl` that make Dagger's MPI backend (SPMD: every rank runs
 the same program and plans every task) cheaper and scalable, developed for a Barnes-Hut code that is to run on 100+ nodes.
 Each branch has its own page here, named after the branch with `/` replaced by `__`.
-**Use `integration/mpi-all`: it contains everything** (the last two branches, `feat/mpi-struct-raw-transport` and `perf/sched-targeted-kicks`, were merged after the targeted tests; the complete `test/mpi/cpu.jl` for the transport change ran on `feat/mpi-struct-raw-transport` only). The single branches exist so that each change can be reviewed, tested and
+**Use `integration/mpi-all`: it contains everything** (the last two branches, `feat/mpi-struct-raw-transport` and `perf/sched-targeted-kicks`, were merged after targeted tests; the complete `test/mpi/cpu.jl` passed on `feat/mpi-struct-raw-transport`, not yet on the merged head). The single branches exist so that each change can be reviewed, tested and
 proposed upstream on its own.
 
 All measurements are from the Fulda cluster (AMD Opteron 6272, 64 cores/node, Open MPI, Julia 1.13) unless a page says otherwise.
@@ -94,8 +94,11 @@ Usage, rules and pitfalls are in `MPI_FEATURES.md` at the repository root (on `i
 
 ## 5. Validation status
 
-* The complete `test/mpi/cpu.jl` passes on `integration/mpi-all` at 2 ranks x 2 threads on Fulda (Open MPI): 1263 and 1270 assertions on
-  the two ranks, no failure, 43 minutes (this run does not yet contain `allgather.jl` and the group-Datadeps test).
+* The complete `test/mpi/cpu.jl` passes at 2 ranks x 2 threads on Fulda (Open MPI): on `integration/mpi-all` at `a3d4650` 1263 and 1270
+  assertions, 43 minutes; on `feat/mpi-struct-raw-transport` (which adds `allgather.jl`, the group-Datadeps test and `struct_transport.jl`)
+  1315 and 1323 assertions on the two ranks, no failure or error, 44 minutes. The "Hit probable hang on recv" lines in these runs (22, then 152) are
+  10-second timers of waits during first-call kernel compilation (A4), never the 120-second abort. The merged head with `perf/sched-targeted-kicks`
+  has had the targeted tests only (798 assertions at 3 ranks).
 * `allgather.jl` and `groups.jl` pass at 2, 3, 4 (and for allgather 7) ranks on MPICH 5.0.2 and Open MPI 5.0.10 (local).
 * Not tested: GPU chunks in rank-local graphs and groups, MPI x GPU in general (no hardware here).
 * Open issues are listed in `AGENTS.md` (lessons) and the maintainer notes; the stencil first-call compile cost (minutes for 3D/4D, a

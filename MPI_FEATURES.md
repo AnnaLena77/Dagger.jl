@@ -221,7 +221,7 @@ and the (de)serialization of the contributions.
 * Do not wait with `yield()` loops (sticky tasks starve the thread's spawned work); use `sleep` or `wait`.
 * A benchmark chain pinned to thread 1 shares that thread with the driver that plans the tasks; pin to another thread.
 * The repository's own MPI suite (`test/mpi/cpu.jl`) takes about 43 minutes at 2 ranks x 2 threads on the Fulda nodes (Open MPI) and passes there on
-  `integration/mpi-all` (1263 and 1270 assertions on the two ranks, no failures); long silent phases (first-call compilation of the stencil and sparse
+  `integration/mpi-all` (1263 and 1270 assertions on the two ranks at `a3d4650`, 1315 and 1323 with the allgather and struct-transport tests, no failures); long silent phases (first-call compilation of the stencil and sparse
   kernels, minutes) print "Hit probable hang on recv" warnings that are only timers. Give a job at least an hour, and do not cancel on the warning.
 
 ## 7. What to report back when something looks wrong
