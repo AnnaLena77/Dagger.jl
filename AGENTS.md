@@ -981,3 +981,25 @@ lesson.
    group per sweep costs more than the sleepers it replaces (8 groups: 259 us).
    What works is fewer live groups: `free_group!` restores the 49 us. Measure
    with `LLM_info/bench/many_groups.jl` before redesigning a poller.
+
+91. **`@reusable` bound variables infer as `Any`; price a scaling suspect with
+   phase timers and A/B in one allocation.** Lesson 40's fix covered
+   `@reusable_vector`/`@reusable_dict` but not `@reusable` itself: its
+   task-local cache global is non-const, so the variable it binds (and
+   everything computed from it in the block) was `Any` -- `length(P)` of a
+   `@reusable ... P begin` block returned `Any`. `estimate_task_costs!`'s
+   `randperm!`/`sort!` of the candidates therefore ran with dynamic dispatch,
+   and a loop I first wrote inside that block measured 27 % *slower* than the
+   baseline in all six rounds (there is no closure and no `Core.Box` here: the
+   macro expands to a plain try/finally). The macro now asserts the cache type;
+   check new scratch code with `@inferred`.
+   The scaling problem itself: unscoped single-process spawns grow from 108 to
+   248 us/task between 8 and 192 threads. Timers around the phases of
+   `schedule_one!` put it in `estimate_task_costs!` (35 us at 8-16 threads,
+   70-155 us at 64; pinned tasks skip it and stay at ~5 us): per-candidate
+   pressure lookups (6 -> 25 us), cost fill (8 -> 15 us), and the candidate
+   shuffle+sort (12 -> 24-58 us). Two separate Slurm jobs of the same revision
+   differ by 30-40 % (11.3 vs 14.7 ms for the same fan-out), so an A/B needs
+   both revisions alternating in one allocation (`LLM_info/bench/ab_fan.sbatch`),
+   several rounds. Sampling profiles of the 200-us spawn path collect only ~100
+   snapshots (lesson 83).
