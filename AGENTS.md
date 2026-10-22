@@ -1003,3 +1003,14 @@ lesson.
    both revisions alternating in one allocation (`LLM_info/bench/ab_fan.sbatch`),
    several rounds. Sampling profiles of the 200-us spawn path collect only ~100
    snapshots (lesson 83).
+
+92. **A short timing window counts a rare pause far too heavily; compare steps,
+   not the mean.** Otus, 8M bodies, 192 threads, 3 timed steps: the step times
+   were 0.187, 0.189 and 0.766 s, because one garbage-collection pause (0.456 s)
+   fell into the third step. The mean (0.381 s) looked like a scaling problem
+   and a sum-of-phases gap of 0.17 s per step ("time in no phase") hid it;
+   with the collection moved out of the window (`--gc_interval=64`) the steps
+   are 0.19 s and the phases add up. Report the per-step list, read the GC
+   counters (`gc.pauses`, `gc.total_s`) before hunting a missing phase, and
+   do not attribute a speed difference between revisions before the same
+   window has been checked for such a pause on both sides.
