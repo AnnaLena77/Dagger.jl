@@ -139,7 +139,11 @@ processes cannot see this failure on their own override it for the tasks they
 need to tell; it must not block. Does nothing by default.
 """
 function task_failed!(thunk, value)
-    accel = thunk.options.acceleration
+    # A recycled thunk has no options (`nothing`). Nothing is left to tell an acceleration about, and throwing here would
+    # escape a pooled task, which is only logged and leaves the scheduler waiting forever (lesson 9).
+    options = thunk.options
+    options === nothing && return
+    accel = options.acceleration
     accel === nothing || task_failed!(accel, thunk, value)
     return
 end
