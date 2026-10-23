@@ -61,6 +61,7 @@ stack by cherry-pick (`feat/mpi-elide-scoped-chunks` carries copies of the cost-
 | `feat/mpi-allgather` | `Dagger.allgather(tasks)` (concrete `Vector`, `allgather(tasks, T)`), Datadeps-in-group test, docs, AGENTS lessons | application: `tree.summarize` 66 -> 20 ms at 104 ranks; cluster: gather+fetch 408 -> 171 ms at 96 ranks, 64 KB per rank |
 | `feat/mpi-struct-raw-transport` | A struct holding bit arrays is sent as raw buffers automatically (other fields in the header, shared arrays and nested structs handled) | 40 MB struct between two nodes 580 -> 210 ms; one node 580 -> 174 ms |
 | `perf/sched-targeted-kicks` | After an enqueue wake only parked runners that can take the task, at most one per task (no kick for `ExactScope`) | one process, 64 threads: unscoped 3.3k -> 5.6k tasks/s (+69 %), pinned 5.5k -> 7.2k (+32 %) |
+| `perf/mpi-rank-scope-planning` | Rank scope planned as cheaply as an `ExactScope`: address-keyed lock-free scope cache, one lookup per task, `constrain(::UnionScope, ::AnyScope)` is the identity, `preferred_processor_count` | foreign rank, rank-scoped task 57-60 -> 19-24 us; owner of a rank-scoped task 196-260 -> 154 us (32 threads) |
 
 At application level (Barnes-Hut, 1M bodies, 16 ranks x 32 threads, measured by the application team): stock Dagger 0.95 s per step,
 `integration/mpi-all` without switches 0.65 s, with owner elision 0.49 s; 4M bodies, 26 ranks: 2.14 s -> 1.10 s.

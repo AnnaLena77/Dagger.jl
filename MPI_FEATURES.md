@@ -60,7 +60,7 @@ while uniformity checks are on or in a rank-local graph. The counts are cumulati
 step and `Dagger.elision_stats()` at its end to get per-step numbers. They only count while the elision switch is on.
 
 Cost of the scope you pass: build `Dagger.scope(mpi_rank=r)` **once** and reuse the object (one call costs ~0.35 ms at 32 threads);
-a task with a rank scope costs a rank that only plans it about 3x an `ExactScope` task (60 vs 20 us at 32 threads), still far below a full plan.
+a task with a rank scope costs a rank that only plans it the same as an `ExactScope` task (19-24 vs 19-29 us at 32 threads, branch `perf/mpi-rank-scope-planning`; before it was ~60 us) and costs its owner less (154 vs 201-239 us). Name the rank, not the thread, unless you need a particular thread: the scheduler (and `free_mpi_threads!`) then place it.
 
 Practical rule: give each task an owner rank (`scope=Dagger.scope(mpi_rank=r)`), keep its inputs as chunks owned by
 that rank, and make the functions type-stable. Measured effect (1 node, 4 ranks): pinned round robin 40.9 -> 13.9 ms
