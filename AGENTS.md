@@ -1014,3 +1014,23 @@ lesson.
    counters (`gc.pauses`, `gc.total_s`) before hunting a missing phase, and
    do not attribute a speed difference between revisions before the same
    window has been checked for such a pause on both sides.
+
+93. **Never read a pooled object after handing it over, and prove a race fix with a
+   widened window.** `do_tasks` pushed each `TaskSpec` into a processor's queue
+   and then read `scope`, `options` and `est_occupancy` again for its wake-up
+   decision. From the push on another runner may take the spec, run it and
+   recycle it (`reset_task_spec!` sets those fields to `nothing`/0), so on few
+   threads the typeassert threw, and `FireTaskSpec` reported the failure under
+   `first_task.thunk_id`, read after the recycle: id 0, or the id of whatever
+   task had reused the spec, which failed an innocent task. A failure delivered
+   to a recycled thunk then threw again in `task_failed!` (`options === nothing`)
+   inside a pooled task, which is a silent hang (lesson 9). Read everything the
+   rest of the function needs while you still own the object; read the id
+   *before* the call that hands it over. The race hit 1 in 20 fresh 2-thread
+   processes on the Fulda nodes and never on a fast laptop; a stress test that
+   merely succeeds proves nothing there. Put a hook right after the hand-over
+   (`Sch.AFTER_ENQUEUE_HOOK`) and sleep in it: the bug then shows in every run,
+   and the test must fail on the unfixed code before it counts. Note that the
+   exception was often invisible to the test's own `fetch` (reported under a
+   stale id), so count the failures (`Sch.FIRE_FAILURES`) instead of waiting
+   for a failed task.
