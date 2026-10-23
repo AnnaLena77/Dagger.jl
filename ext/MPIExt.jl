@@ -890,16 +890,18 @@ function take_ref_id!()
 end
 
 #TODO: partitioned scheduling with comm bifurcation
-function tochunk_pset(x, space::MPIMemorySpace; device=nothing, force_nonlocal=false, kwargs...)
+# N.B. `type=` is for the Chunk's metadata only (MemPool.poolset does not accept it), so it is
+# taken as its own keyword rather than filtered out of `kwargs`: rebuilding the NamedTuple
+# through a generator cost ~650 ns and 7 allocations per call (laptop; 826 -> 182 ns), and
+# every MPI task result goes through here
+function tochunk_pset(x, space::MPIMemorySpace; device=nothing, force_nonlocal=false, type=nothing, kwargs...)
     @assert space.comm == MPI.COMM_WORLD || MPI.Comm_size(space.comm) == 1 || mpi_is_group(space.comm) "$(space.comm) is neither the world, a rank-local communicator nor a registered group"
     local_rank = MPI.Comm_rank(space.comm)
     Mid = take_ref_id!()
     if local_rank != space.rank || force_nonlocal
         return MPIRef(space.comm, space.rank, 0, nothing, Mid)
     else
-        # type= is for Chunk metadata only; MemPool.poolset does not accept it
-        pset_kw = (; (k => v for (k, v) in pairs(kwargs) if k !== :type)...)
-        return MPIRef(space.comm, space.rank, sizeof(x), poolset(x; device, pset_kw...), Mid)
+        return MPIRef(space.comm, space.rank, sizeof(x), poolset(x; device, kwargs...), Mid)
     end
 end
 
