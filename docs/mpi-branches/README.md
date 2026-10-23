@@ -60,6 +60,7 @@ stack by cherry-pick (`feat/mpi-elide-scoped-chunks` carries copies of the cost-
 | `perf/mpi-elide-typed-proc` | Typed processor in `elide_task!`, one scoped lookup in `take_ref_id!` | 19.3 -> 16.75 us per foreign task (-13 %) |
 | `feat/mpi-allgather` | `Dagger.allgather(tasks)` (concrete `Vector`, `allgather(tasks, T)`), Datadeps-in-group test, docs, AGENTS lessons | application: `tree.summarize` 66 -> 20 ms at 104 ranks; cluster: gather+fetch 408 -> 171 ms at 96 ranks, 64 KB per rank |
 | `feat/mpi-struct-raw-transport` | A struct holding bit arrays is sent as raw buffers automatically (other fields in the header, shared arrays and nested structs handled) | 40 MB struct between two nodes 580 -> 210 ms; one node 580 -> 174 ms |
+| `fix/mpi-raw-transport-views` | Array wrappers (`SubArray`, reshaped/permuted views) are never sent as raw parts of their parent (bug of `feat/mpi-struct-raw-transport`) | `copyto!(::DArray, ::Matrix)` 2048^2, 2 ranks: 2.1-2.9 s -> 0.05-0.1 s; 8192^2 no longer takes minutes |
 | `perf/sched-targeted-kicks` | After an enqueue wake only parked runners that can take the task, at most one per task (no kick for `ExactScope`) | one process, 64 threads: unscoped 3.3k -> 5.6k tasks/s (+69 %), pinned 5.5k -> 7.2k (+32 %) |
 
 At application level (Barnes-Hut, 1M bodies, 16 ranks x 32 threads, measured by the application team): stock Dagger 0.95 s per step,
