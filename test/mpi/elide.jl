@@ -63,6 +63,23 @@ elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete
             @test_throws Exception fetch(bad)
             dep = Dagger.@spawn scope=Dagger.scope(mpi_rank=nranks-1) elide_inc(bad)
             @test_throws Exception fetch(dep)
+            # What a rank scope names is cached under the scope's address and confirmed with `===`: two equal scopes built
+            # separately resolve to the same rank, scopes of different ranks never share an answer, and a scope that is
+            # dropped and replaced by another one (a recycled address) cannot return the old answer.
+            for target in 0:nranks-1
+                s1 = Dagger.scope(mpi_rank=target); s2 = Dagger.scope(mpi_rank=target)
+                @test s1 == s2
+                for s in (s1, s2, s1, s2)
+                    o = Dagger.Options(; scope=s)
+                    p = MPIExt.mpi_scope_processor(o)
+                    @test p isa MPIExt.MPIProcessor && p.rank == target
+                end
+            end
+            for round in 1:20, target in 0:nranks-1
+                o = Dagger.Options(; scope=Dagger.scope(mpi_rank=target))     # a new scope object every time
+                @test MPIExt.mpi_scope_processor(o).rank == target
+                GC.gc(false)
+            end
             # several ranks allowed: the rank is the scheduler's choice, nothing is elided
             multi = Dagger.@spawn scope=Dagger.scope(mpi_ranks=:) elide_inc(1)
             @test multi.stub === nothing
