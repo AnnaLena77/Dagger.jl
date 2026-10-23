@@ -28,3 +28,7 @@ The throughput no longer falls between 32 and 64 threads but stays at about 6-8k
 ## Main files
 
 `src/sch/Sch.jl`
+
+## Known issue, fixed (2026-10-23)
+
+`do_tasks` read each `TaskSpec` again after handing it to the processor's queue (for the all-pinned check and the wake-up decision). Another runner can take, run and recycle a short task by then (`reset_task_spec!` sets `scope` and `options` to `nothing`), which threw `TypeError: in typeassert, expected Dagger.AbstractScope, got a value of type Nothing` on few threads with short tasks (1 in 20 fresh 2-thread processes on Fulda), reported the failure under a recycled task id, and could end in a hang (`task_failed!` on a recycled thunk). Fixed in `Sched: do not read a TaskSpec after handing it to the queue` and `Sched: task_failed! must not throw for a thunk that has no options` (`AGENTS.md` lesson 93); test: `Batch enqueue does not read a recycled spec` in `test/scheduler.jl`, which widens the window through `Sch.AFTER_ENQUEUE_HOOK`. Revisions before `55e03c9` (this branch) and `523d0ac` (`integration/mpi-all`) contain the bug.

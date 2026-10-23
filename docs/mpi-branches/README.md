@@ -64,6 +64,7 @@ stack by cherry-pick (`feat/mpi-elide-scoped-chunks` carries copies of the cost-
 | `perf/mpi-tochunk-kw` | MPI task results built without rebuilding their keyword arguments (stock defect) | `tochunk` 1067 -> 450 ns; plain `@spawn` 36.5 -> 26.4 us per task |
 | `perf/mpi-space-processors-cache` | Sorted processor list of an MPI memory space built once, not per call (stock defect) | MPI Cholesky 4096^2, 1 x 64: 0.76-0.79 -> 0.36-0.38 s (= shared memory); 2 x 32: 0.79-0.89 -> 0.48-0.50 s |
 | `perf/sched-targeted-kicks` | After an enqueue wake only parked runners that can take the task, at most one per task (no kick for `ExactScope`) | one process, 64 threads: unscoped 3.3k -> 5.6k tasks/s (+69 %), pinned 5.5k -> 7.2k (+32 %) |
+| `perf/mpi-rank-scope-planning` | Rank scope planned as cheaply as an `ExactScope`: address-keyed lock-free scope cache, one lookup per task, `constrain(::UnionScope, ::AnyScope)` is the identity, `preferred_processor_count` | foreign rank, rank-scoped task 57-60 -> 19-24 us; owner of a rank-scoped task 196-260 -> 154 us (32 threads) |
 
 At application level (Barnes-Hut, 1M bodies, 16 ranks x 32 threads, measured by the application team): stock Dagger 0.95 s per step,
 `integration/mpi-all` without switches 0.65 s, with owner elision 0.49 s; 4M bodies, 26 ranks: 2.14 s -> 1.10 s.

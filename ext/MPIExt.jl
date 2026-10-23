@@ -2932,14 +2932,26 @@ end
 
 # Scopes are reused (a `with_options(scope=...)` block hands the same object to every
 # task spawned under it), so what a union scope names is worked out once per scope.
-const MPI_UNION_SCOPE_CACHE = LockedObject(Dict{UInt,Tuple{Any,Any}}())
+#
+# The key is the scope's address, not `objectid(scope)`: a `UnionScope` holds a tuple with
+# one `ExactScope` per processor, and `objectid` hashes all of it, which made a plain rank
+# scope (`Dagger.scope(mpi_rank=r)`, one entry per thread) cost ~35 us more to plan than an
+# `ExactScope`, three times per task. The entry keeps the scope alive and Julia's GC does not
+# move objects, so an address cannot be reused while its entry exists and `===` on a hit
+# (pointer equality first) confirms it. Reads take no lock: the table is replaced as a whole.
+# `pointer_from_objref` refuses immutable values; a `UnionScope` is one, but it is not a bits type, so it is always
+# a heap object and this is the address of that object (never of a copy)
+mpi_object_address(x) = UInt(ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), x))
+
+mutable struct MPIUnionScopeCache
+    @atomic table::Dict{UInt,Tuple{Any,Any}}
+end
+const MPI_UNION_SCOPE_CACHE = MPIUnionScopeCache(Dict{UInt,Tuple{Any,Any}}())
+const MPI_UNION_SCOPE_CACHE_LOCK = ReentrantLock()
 
 function mpi_union_scope_processor(scope::Dagger.UnionScope)
-    key = objectid(scope)
-    hit = lock(MPI_UNION_SCOPE_CACHE) do cache
-        get(cache, key, nothing)
-    end
-    # `===`: the entry keeps the scope alive, so a hit cannot be a recycled objectid
+    key = mpi_object_address(scope)
+    hit = get((@atomic MPI_UNION_SCOPE_CACHE.table), key, nothing)
     hit !== nothing && hit[1] === scope && return hit[2]
     proc = nothing
     scopes = scope.scopes
@@ -2950,9 +2962,11 @@ function mpi_union_scope_processor(scope::Dagger.UnionScope)
             proc = argmin(short_name, [sc.processor for sc in scopes])
         end
     end
-    lock(MPI_UNION_SCOPE_CACHE) do cache
-        length(cache) >= 256 && empty!(cache)
-        cache[key] = (scope, proc)
+    lock(MPI_UNION_SCOPE_CACHE_LOCK) do
+        old = @atomic MPI_UNION_SCOPE_CACHE.table
+        table = length(old) >= 256 ? Dict{UInt,Tuple{Any,Any}}() : copy(old)
+        table[key] = (scope, proc)
+        @atomic MPI_UNION_SCOPE_CACHE.table = table
     end
     return proc
 end
@@ -2971,7 +2985,11 @@ end
 mpi_failure_only(::Nothing) = false
 function mpi_failure_only(opts::Options)
     Dagger.ELIDE_FOREIGN_TASKS[] && !CHECK_UNIFORMITY[] && opts.tag === nothing || return false
-    proc = mpi_scope_processor(opts)
+    return mpi_failure_only(opts, mpi_scope_processor(opts))
+end
+# With the task's processor already worked out (`elide_task!` needs it for other things too)
+function mpi_failure_only(opts::Options, proc::Union{Nothing,MPIProcessor})
+    Dagger.ELIDE_FOREIGN_TASKS[] && !CHECK_UNIFORMITY[] && opts.tag === nothing || return false
     return proc !== nothing && (proc.comm == MPI.COMM_WORLD || mpi_is_group(proc.comm))
 end
 
@@ -3176,15 +3194,18 @@ function Dagger.elide_task!(accel::MPIAcceleration, spec, task)
     # Only tasks of the world are planned by every rank; a rank-local graph has nothing to elide
     accel.comm == MPI.COMM_WORLD || mpi_is_group(accel.comm) || return elide_no(E_NOT_APPLICABLE)
     opts = spec.options
-    # Tasks without a scope are placed here, so that every rank knows the owner
-    if mpi_task_processor(opts) === nothing && opts.compute_scope === nothing && opts.scope === nothing
-        mpi_preplace!(accel, spec, task)
-    end
+    # Tasks without a scope are placed here, so that every rank knows the owner.
+    # N.B. The processor a union scope names is looked up once per task: it is the same
+    # answer every time, and each lookup is a hash-table probe on every task.
     proc = mpi_task_processor(opts)
+    if proc === nothing && opts.compute_scope === nothing && opts.scope === nothing
+        mpi_preplace!(accel, spec, task)
+        proc = mpi_task_processor(opts)
+    end
     proc === nothing && return elide_no(E_NO_OWNER_KNOWN)
     # Later submissions use this to decide about their own arguments, and `fetch`
     # to stay uniform when the task fails. Only failure-only tasks have an owner.
-    mpi_failure_only(opts) || return elide_no(E_NOT_FAILURE_ONLY)
+    mpi_failure_only(opts, proc) || return elide_no(E_NOT_FAILURE_ONLY)
     task.owner = proc.rank
     local_rank = MPI.Comm_rank(proc.comm)
     proc.rank == local_rank && return elide_no(E_OWN_TASK)

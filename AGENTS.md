@@ -1034,3 +1034,22 @@ lesson.
    exception was often invisible to the test's own `fetch` (reported under a
    stale id), so count the failures (`Sch.FIRE_FAILURES`) instead of waiting
    for a failed task.
+
+94. **A cache keyed by `objectid` of a scope, and a generic `constrain`, both cost
+   O(threads) on the per-task path.** `Dagger.scope(mpi_rank=r)` is a `UnionScope`
+   holding a tuple of one `ExactScope` per thread. `objectid` of it hashes the
+   whole tuple, so the lock-protected union-scope cache of `elide_task!` cost
+   ~35 us per lookup and was probed three times per task; and
+   `constrain(::UnionScope, y)` is generic (it wraps `y` and rebuilds the whole
+   union), so `constrain(rank_scope, AnyScope())`, which `schedule_one!` does for
+   every task, cost ~90 us and 11 KB of garbage to return its argument. Both
+   showed up only as "a rank scope is 3-4x an `ExactScope`" until a profile of
+   a rank that only plans (and one of the owner) named the frames. Key such caches
+   by the object's address (`jl_value_ptr`; a union scope is not a bits type, the
+   entry keeps it alive, the GC does not move it, `===` is pointer-equal first)
+   and read them without a lock; give the identity cases their own `constrain`
+   method; resolve a per-task fact once per task, not once per consumer.
+   Before and after (2 ranks x 32 threads): foreign planner 57-60 -> 19-24 us,
+   owner 196-260 -> 154 us per rank-scoped task. Also: a plain unscoped task is
+   not cheaper to plan than a rank-scoped one (`mpi_preplace!` makes it one), and
+   two equal immutable scopes are `===`, so a test cannot tell them apart by identity.
