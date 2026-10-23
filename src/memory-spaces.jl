@@ -266,8 +266,13 @@ raw_field_kind(::Type{F}) where {F} =
     isbitstype(F) ? :value :
     (F <: Array && isconcretetype(F) && isbitstype(eltype(F))) ? :array :
     (isconcretetype(F) && isstructtype(F) && !ismutabletype(F) && raw_has_array(F)) ? :struct : :value
+# An array *wrapper* (`SubArray`, `ReshapedArray`, `PermutedDimsArray`, ...) is never decomposed: its
+# array field is the whole parent, which it does not own. A 256 x 256 view of a 2048 x 2048 matrix
+# travelled as all 32 MB of the parent, so `copyto!(::DArray, ::Matrix)` (one view per block) grew
+# with blocks x matrix size: 2048^2 in 256^2 blocks, 2 ranks: 2.1-2.9 s. `serialize` sends only the
+# viewed elements.
 function raw_has_array(::Type{T}) where {T}
-    (isconcretetype(T) && isstructtype(T) && !(T <: Array) && fieldcount(T) > 0) || return false
+    (isconcretetype(T) && isstructtype(T) && !(T <: AbstractArray) && fieldcount(T) > 0) || return false
     any(i -> raw_field_kind(fieldtype(T, i)) in (:array, :struct), 1:fieldcount(T))
 end
 # Emit the expressions that read the parts / header values / array sizes of `x::T`, in field order

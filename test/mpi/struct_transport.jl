@@ -20,6 +20,10 @@ struct NestedBundle                    # an immutable struct holding arrays insi
     ys::Vector{Int32}
     label::String
 end
+struct ViewBundle                      # an array next to a view: only the array goes raw
+    a::Vector{Float64}
+    v::SubArray{Float64,2,Matrix{Float64},Tuple{UnitRange{Int},UnitRange{Int}},false}
+end
 struct NoArrays                        # nothing to send raw
     name::String
     a::Int
@@ -56,6 +60,15 @@ guard_check(b::GuardedBundle) = b.total == 2.0 * length(b.v)
         @test Dagger.inplace_mpi_parts(NoArrays("x", 1)) === nothing
         @test Dagger.inplace_mpi_parts(shared_make(5)) === nothing       # shared array: left to serialize
         @test Dagger.inplace_mpi_parts(3.0) === nothing
+        # An array wrapper is not decomposed: its array field is the whole parent
+        big = rand(64, 64)
+        @test Dagger.inplace_mpi_parts(view(big, 1:8, 1:8)) === nothing
+        @test Dagger.inplace_mpi_parts(reshape(view(big, :, 1), 8, 8)) === nothing
+        @test Dagger.inplace_mpi_parts(PermutedDimsArray(big, (2, 1))) === nothing
+        # ...also not as a field of a struct: the view rides in the serialized header
+        vb = ViewBundle(collect(1.0:4.0), view(big, 1:2, 1:2))
+        vparts, vheader = Dagger.inplace_mpi_parts(vb)
+        @test length(vparts) == 1 && vparts[1] === vb.a
         parts, header = Dagger.inplace_mpi_parts(raw_make(5))
         @test length(parts) == 2 && parts[1] isa Vector{UInt64} && parts[2] isa Matrix{Float32}
         b = Dagger.inplace_mpi_build(RawBundle, Dagger.inplace_mpi_alloc(RawBundle, header), header)
