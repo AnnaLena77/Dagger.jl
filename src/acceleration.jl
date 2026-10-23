@@ -310,6 +310,18 @@ function sort_processors_canonical!(procs, accel::Acceleration)
     return permute!(procs, sortperm(keys))
 end
 
+"""
+    preferred_processor_count(procs, accel, rank) -> Int
+
+How many of the processors in canonically sorted `procs` are owned by `rank`. This is the helper of upstream PR #771 (which rotates
+the preferred rank's processors by task id); this fork found the range by binary search (`preferred_processor_range`) when it
+implemented the same placement, and keeps the upstream name so that code that probes for it, or calls it, works on both.
+"""
+function preferred_processor_count(procs, @nospecialize(accel), rank)
+    lo, hi = preferred_processor_range(procs, accel, rank)
+    return lo <= hi ? hi - lo + 1 : 0
+end
+
 # Index range of the processors owned by `rank` in canonically sorted `procs`
 # (empty, `lo > hi`, when it owns none). Binary search: the canonical order is
 # sorted by owner rank. The acceleration is passed through unspecialized, and

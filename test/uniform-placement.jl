@@ -51,6 +51,15 @@ end
         @test issorted(procs; by=p -> Dagger.processor_order_key(accel, p))
     end
 
+    @testset "preferred_processor_count (upstream PR #771 name)" begin
+        procs = Dagger.Processor[RankProc(r, t) for r in 3:-1:0 for t in 1:(r + 1)]
+        shuffle!(rng, procs)
+        Dagger.sort_processors_canonical!(procs, accel)
+        for r in 0:4
+            @test Dagger.preferred_processor_count(procs, accel, r) == count(p -> p.rank == r, procs)
+        end
+    end
+
     @testset "matches the reference algorithm" begin
         for nranks in (1, 2, 5), nthreads in (1, 3, 8), trial in 1:20
             candidates = Dagger.Processor[RankProc(r, t) for r in 0:nranks-1 for t in 1:nthreads]
