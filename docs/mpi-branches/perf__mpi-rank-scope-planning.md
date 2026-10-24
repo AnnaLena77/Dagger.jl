@@ -31,6 +31,20 @@ No new scope type was needed: `Dagger.scope(mpi_rank=r)` is unchanged for the sc
 | owner of a rank-scoped task (spawn + wait) | 196-260 | **154** (an `ExactScope` task: 201-239) |
 | owner of a plain task without arguments | 148 | 106 |
 
+## Decision measurement before the merge into `integration/mpi-all` (2026-10-24)
+
+Interleaved A/B on Fulda (2 ranks x 32 threads, 3 rounds), `integration/mpi-all` with B11+B12 against the same tree plus this branch and `fix/mpi-elide-stub-processor`:
+
+| | without | with |
+|---|---|---|
+| rank-scoped task, planned by the other rank | 54-55 us | 19-21 us |
+| rank-scoped task, owner (rank 1 / rank 0) | 53-56 / 220-264 us | 19.5-20.5 / 149-183 us |
+| plain task (no scope) | 142-162 us | 108-130 us |
+| MPI Cholesky 4096^2/256^2, median per factorization | 0.596-0.614 s | 0.599-0.615 s |
+| Barnes-Hut 1M, 1 node 4 x 16, pinned, 16 steps x 3 rounds, steps 4-16 | median 1.540 s | median 1.535 s |
+
+Full MPI suite (free threads off): 1888 / 1881 assertions, 0 failures.
+
 ## Tests
 
 * `test/mpi/elide.jl`: the cache is correct by object, not by content (two equal scopes resolve alike, scopes of different ranks never share an answer, 20 rounds of fresh scope objects with `GC.gc(false)`); 3 ranks: 208 and 212 assertions together with `free_threads.jl` and `comm_self.jl`.
